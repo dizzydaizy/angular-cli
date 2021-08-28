@@ -59,6 +59,7 @@ ts_json_schema(
 
 ts_library(
     name = "build_angular",
+    package_name = "@angular-devkit/build-angular",
     srcs = glob(
         include = [
             "src/**/*.ts",
@@ -94,7 +95,6 @@ ts_library(
     module_root = "src/index.d.ts",
     deps = [
         "//packages/angular_devkit/architect",
-        "//packages/angular_devkit/build_optimizer",
         "//packages/angular_devkit/build_webpack",
         "//packages/angular_devkit/core",
         "//packages/angular_devkit/core/node",
@@ -142,7 +142,6 @@ ts_library(
         "@npm//core-js",
         "@npm//critters",
         "@npm//css-loader",
-        "@npm//css-minimizer-webpack-plugin",
         "@npm//esbuild",
         "@npm//find-cache-dir",
         "@npm//glob",
@@ -176,7 +175,6 @@ ts_library(
         "@npm//stylus",
         "@npm//stylus-loader",
         "@npm//terser",
-        "@npm//terser-webpack-plugin",
         "@npm//text-table",
         "@npm//tree-kill",
         "@npm//tslib",

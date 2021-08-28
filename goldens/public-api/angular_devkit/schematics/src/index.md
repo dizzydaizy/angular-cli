@@ -488,13 +488,13 @@ export class HostSink extends SimpleSinkBase {
     // (undocumented)
     _done(): Observable<void>;
     // (undocumented)
-    protected _filesToCreate: Map<Path, UpdateBuffer>;
+    protected _filesToCreate: Map<Path, UpdateBufferBase>;
     // (undocumented)
     protected _filesToDelete: Set<Path>;
     // (undocumented)
     protected _filesToRename: Set<[Path, Path]>;
     // (undocumented)
-    protected _filesToUpdate: Map<Path, UpdateBuffer>;
+    protected _filesToUpdate: Map<Path, UpdateBufferBase>;
     // (undocumented)
     protected _force: boolean;
     // (undocumented)
@@ -587,9 +587,6 @@ export class InvalidSourceResultException extends BaseException {
 export class InvalidUpdateRecordException extends BaseException {
     constructor();
 }
-
-// @public @deprecated (undocumented)
-export function isAction(action: any): action is Action;
 
 // @public (undocumented)
 export function isContentAction(action: Action): action is CreateFileAction | OverwriteFileAction;

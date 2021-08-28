@@ -24,7 +24,7 @@ interface AngularCustomOptions extends Pick<ApplicationPresetOptions, 'angularLi
 function requiresLinking(path: string, source: string): boolean {
   // @angular/core and @angular/compiler will cause false positives
   // Also, TypeScript files do not require linking
-  if (/[\\\/]@angular[\\\/](?:compiler|core)|\.tsx?$/.test(path)) {
+  if (/[\\/]@angular[\\/](?:compiler|core)|\.tsx?$/.test(path)) {
     return false;
   }
 
@@ -66,11 +66,14 @@ export default custom<AngularCustomOptions>(() => {
       const esTarget = scriptTarget as ScriptTarget | undefined;
       if (esTarget !== undefined) {
         if (esTarget < ScriptTarget.ES2015) {
-          // TypeScript files will have already been downlevelled
-          customOptions.forceES5 = !/\.tsx?$/.test(this.resourcePath);
-        } else if (esTarget >= ScriptTarget.ES2017) {
+          customOptions.forceES5 = true;
+        } else if (esTarget >= ScriptTarget.ES2017 || /\.[cm]?js$/.test(this.resourcePath)) {
+          // Application code (TS files) will only contain native async if target is ES2017+.
+          // However, third-party libraries can regardless of the target option.
+          // APF packages with code in [f]esm2015 directories is downlevelled to ES2015 and
+          // will not have native async.
           customOptions.forceAsyncTransformation =
-            !/[\\\/][_f]?esm2015[\\\/]/.test(this.resourcePath) && source.includes('async');
+            !/[\\/][_f]?esm2015[\\/]/.test(this.resourcePath) && source.includes('async');
         }
         shouldProcess ||= customOptions.forceAsyncTransformation || customOptions.forceES5;
       }
@@ -78,7 +81,7 @@ export default custom<AngularCustomOptions>(() => {
       // Analyze for i18n inlining
       if (
         i18n &&
-        !/[\\\/]@angular[\\\/](?:compiler|localize)/.test(this.resourcePath) &&
+        !/[\\/]@angular[\\/](?:compiler|localize)/.test(this.resourcePath) &&
         source.includes('$localize')
       ) {
         customOptions.i18n = i18n as ApplicationPresetOptions['i18n'];
@@ -86,7 +89,7 @@ export default custom<AngularCustomOptions>(() => {
       }
 
       if (optimize) {
-        const angularPackage = /[\\\/]node_modules[\\\/]@angular[\\\/]/.test(this.resourcePath);
+        const angularPackage = /[\\/]node_modules[\\/]@angular[\\/]/.test(this.resourcePath);
         customOptions.optimize = {
           // Angular packages provide additional tested side effects guarantees and can use
           // otherwise unsafe optimizations.

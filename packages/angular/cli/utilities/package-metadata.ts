@@ -7,14 +7,13 @@
  */
 
 import { logging } from '@angular-devkit/core';
+import * as lockfile from '@yarnpkg/lockfile';
 import { existsSync, readFileSync } from 'fs';
+import * as ini from 'ini';
 import { homedir } from 'os';
+import * as pacote from 'pacote';
 import * as path from 'path';
 import { JsonSchemaForNpmPackageJsonFiles } from './package-json';
-
-const lockfile = require('@yarnpkg/lockfile');
-const ini = require('ini');
-const pacote = require('pacote');
 
 const npmPackageJsonCache = new Map<string, Promise<Partial<NpmRepositoryPackageJson>>>();
 
@@ -181,7 +180,7 @@ function normalizeOptions(
 
     // Substitute any environment variable references.
     if (typeof value === 'string') {
-      substitutedValue = value.replace(/\$\{([^\}]+)\}/, (_, name) => process.env[name] || '');
+      substitutedValue = value.replace(/\$\{([^}]+)\}/, (_, name) => process.env[name] || '');
     }
 
     switch (key) {

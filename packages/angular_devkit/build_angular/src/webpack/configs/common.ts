@@ -7,10 +7,6 @@
  */
 
 import {
-  BuildOptimizerWebpackPlugin,
-  buildOptimizerLoaderPath,
-} from '@angular-devkit/build-optimizer';
-import {
   GLOBAL_DEFS_FOR_TERSER,
   GLOBAL_DEFS_FOR_TERSER_WITH_AOT,
   VERSION as NG_VERSION,
@@ -35,9 +31,7 @@ import { WebpackConfigOptions } from '../../utils/build-options';
 import { findCachePath } from '../../utils/cache-path';
 import {
   allowMangle,
-  allowMinify,
   cachingDisabled,
-  maxWorkers,
   persistentBuildCacheEnabled,
   profilingEnabled,
 } from '../../utils/environment-options';
@@ -231,7 +225,7 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
     const CircularDependencyPlugin = require('circular-dependency-plugin');
     extraPlugins.push(
       new CircularDependencyPlugin({
-        exclude: /[\\\/]node_modules[\\\/]/,
+        exclude: /[\\/]node_modules[\\/]/,
       }),
     );
   }
@@ -301,46 +295,8 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
     });
   }
 
-  let buildOptimizerUseRule: RuleSetRule[] = [];
-  if (buildOptions.buildOptimizer && wco.scriptTarget < ScriptTarget.ES2015) {
-    extraPlugins.push(new BuildOptimizerWebpackPlugin());
-    buildOptimizerUseRule = [
-      {
-        loader: buildOptimizerLoaderPath,
-        options: { sourceMap: scriptsSourceMap },
-      },
-    ];
-  }
-
   const extraMinimizers = [];
-
   if (scriptsOptimization) {
-    const globalScriptsNames = globalScriptsByBundleName.map((s) => s.bundleName);
-
-    if (globalScriptsNames.length > 0) {
-      // Script bundles are fully optimized here in one step since they are never downleveled.
-      // They are shared between ES2015 & ES5 outputs so must support ES5.
-      // The `terser-webpack-plugin` will add the minified flag to the asset which will prevent
-      // additional optimizations by the next plugin.
-      const TerserPlugin = require('terser-webpack-plugin');
-      extraMinimizers.push(
-        new TerserPlugin({
-          parallel: maxWorkers,
-          extractComments: false,
-          include: globalScriptsNames,
-          terserOptions: {
-            ecma: 5,
-            compress: allowMinify,
-            output: {
-              ascii_only: true,
-              wrap_func_args: false,
-            },
-            mangle: allowMangle && platform !== 'server',
-          },
-        }),
-      );
-    }
-
     extraMinimizers.push(
       new JavaScriptOptimizerPlugin({
         define: buildOptions.aot ? GLOBAL_DEFS_FOR_TERSER_WITH_AOT : GLOBAL_DEFS_FOR_TERSER,
@@ -400,21 +356,21 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
         {
           // Mark files inside `@angular/core` as using SystemJS style dynamic imports.
           // Removing this will cause deprecation warnings to appear.
-          test: /[\/\\]@angular[\/\\]core[\/\\].+\.js$/,
+          test: /[/\\]@angular[/\\]core[/\\].+\.js$/,
           parser: { system: true },
         },
         {
           // Mark files inside `rxjs/add` as containing side effects.
           // If this is fixed upstream and the fixed version becomes the minimum
           // supported version, this can be removed.
-          test: /[\/\\]rxjs[\/\\]add[\/\\].+\.js$/,
+          test: /[/\\]rxjs[/\\]add[/\\].+\.js$/,
           sideEffects: true,
         },
         {
           test: /\.[cm]?js$|\.tsx?$/,
           // The below is needed due to a bug in `@babel/runtime`. See: https://github.com/babel/babel/issues/12824
           resolve: { fullySpecified: false },
-          exclude: [/[\/\\](?:core-js|\@babel|tslib|web-animations-js)[\/\\]/],
+          exclude: [/[/\\](?:core-js|@babel|tslib|web-animations-js)[/\\]/],
           use: [
             {
               loader: require.resolve('../../babel/webpack-loader'),
@@ -422,10 +378,9 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
                 cacheDirectory: findCachePath('babel-webpack'),
                 scriptTarget: wco.scriptTarget,
                 aot: buildOptions.aot,
-                optimize: buildOptions.buildOptimizer && wco.scriptTarget >= ScriptTarget.ES2015,
+                optimize: buildOptions.buildOptimizer,
               },
             },
-            ...buildOptimizerUseRule,
           ],
         },
         ...extraRules,
@@ -434,6 +389,9 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
     experiments: {
       syncWebAssembly: true,
       asyncWebAssembly: true,
+    },
+    infrastructureLogging: {
+      level: buildOptions.verbose ? 'verbose' : 'error',
     },
     cache: getCacheSettings(wco, buildBrowserFeatures.supportedBrowsers),
     optimization: {
@@ -446,7 +404,7 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
       // Always replace the context for the System.import in angular/core to prevent warnings.
       // https://github.com/angular/angular/issues/11580
       new ContextReplacementPlugin(
-        /\@angular(\\|\/)core(\\|\/)/,
+        /@angular[\\/]core[\\/]/,
         path.join(projectRoot, '$_lazy_route_resources'),
         {},
       ),

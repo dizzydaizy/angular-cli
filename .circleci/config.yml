@@ -10,16 +10,16 @@
 version: 2.1
 
 orbs:
-  browser-tools: circleci/browser-tools@1.0.1
+  browser-tools: circleci/browser-tools@1.1.3
 
 # Variables
 
 ## IMPORTANT
 # Windows needs its own cache key because binaries in node_modules are different.
 # See https://circleci.com/docs/2.0/caching/#restoring-cache for how prefixes work in CircleCI.
-var_1: &cache_key v1-angular_devkit-14.15-{{ checksum "yarn.lock" }}
-var_1_win: &cache_key_win v1-angular_devkit-win-12.22-{{ checksum "yarn.lock" }}
-var_3: &default_nodeversion '14.15'
+var_1: &cache_key v1-angular_devkit-14.19-{{ checksum "yarn.lock" }}
+var_1_win: &cache_key_win v1-angular_devkit-win-14.19-{{ checksum "yarn.lock" }}
+var_3: &default_nodeversion '14.19'
 # Workspace initially persisted by the `setup` job, and then enhanced by `setup-and-build-win`.
 # https://circleci.com/docs/2.0/workflows/#using-workspaces-to-share-data-among-jobs
 # https://circleci.com/blog/deep-diving-into-circleci-workspaces/
@@ -29,6 +29,8 @@ var_5: &only_release_branches
   filters:
     branches:
       only:
+        - main
+        # TODO(BRANCH_RENAME_CLEANUP): remove
         - master
         - /\d+\.\d+\.x/
 
@@ -83,8 +85,8 @@ commands:
           at: *workspace_location
   setup_windows:
     steps:
-      - run: nvm install 12.22.1
-      - run: nvm use 12.22.1
+      - run: nvm install 14.19
+      - run: nvm use 14.19
       - run: npm install -g yarn@1.22.10
       - run: node --version
       - run: yarn --version
@@ -184,8 +186,8 @@ jobs:
       - run:
           name: Validate Circular Dependencies
           command: yarn ts-circular-deps:check
-      - run:
-          command: yarn -s admin validate
+      - run: yarn -s admin validate
+      - run: yarn -s check-tooling-setup
 
   e2e-cli:
     parameters:
@@ -204,7 +206,10 @@ jobs:
       - browser-tools/install-chrome
       - run:
           name: Initialize Environment
-          command: ./.circleci/env.sh
+          # npm 7 currently does not properly publish the packages locally
+          command: |
+            ./.circleci/env.sh
+            sudo npm install --global npm@6
       - run:
           name: Execute CLI E2E Tests
           command: |
@@ -215,6 +220,11 @@ jobs:
           command: |
             mkdir /mnt/ramdisk/e2e-yarn
             node ./tests/legacy-cli/run_e2e --nb-shards=${CIRCLE_NODE_TOTAL} --shard=${CIRCLE_NODE_INDEX} <<# parameters.snapshots >>--ng-snapshots<</ parameters.snapshots >> --yarn --tmpdir=/mnt/ramdisk/e2e-yarn --glob="{tests/basic/**,tests/update/**,tests/commands/add/**}"
+      - run:
+          name: Execute CLI E2E Tests Subset with esbuild builder
+          command: |
+            mkdir /mnt/ramdisk/e2e-esbuild
+            node ./tests/legacy-cli/run_e2e --nb-shards=${CIRCLE_NODE_TOTAL} --shard=${CIRCLE_NODE_INDEX} <<# parameters.snapshots >>--ng-snapshots<</ parameters.snapshots >> --esbuild --tmpdir=/mnt/ramdisk/e2e-esbuild --glob="{tests/basic/**,tests/build/prod-build.ts}" --ignore="tests/basic/{environment,rebuild,serve,scripts-array}.ts"
       - fail_fast
 
   test-browsers:
@@ -259,7 +269,9 @@ jobs:
       - run: sudo cp .circleci/bazel.rc /etc/bazel.bazelrc
       - run:
           command: yarn bazel:test
-          no_output_timeout: 20m
+          # This timeout provides time for the actual tests to timeout and report status
+          # instead of CircleCI stopping the job without test failure information.
+          no_output_timeout: 40m
       - fail_fast
 
   snapshot_publish:
@@ -267,6 +279,7 @@ jobs:
     resource_class: medium
     steps:
       - custom_attach_workspace
+      - install_python
       - run:
           name: Decrypt Credentials
           # Note: when changing the image, you might have to re-encrypt the credentials with a
@@ -285,7 +298,19 @@ jobs:
     executor: windows-executor
     parallelism: 8
     steps:
-      - custom_attach_workspace
+      - checkout
+      - run:
+          name: Rebase PR on target branch
+          command: |
+            if (Test-Path env:CIRCLE_PR_NUMBER) {
+              # User is required for rebase.
+              git config user.name "angular-ci"
+              git config user.email "angular-ci"
+              # Rebase PR on top of target branch.
+              node tools/rebase-pr.js angular/angular-cli $env:CIRCLE_PR_NUMBER
+            } else {
+              echo "This build is not over a PR, nothing to do."
+            }
       - setup_windows
       - restore_cache:
           keys:
@@ -300,7 +325,7 @@ jobs:
           name: Execute E2E Tests
           command: |
             if (Test-Path env:CIRCLE_PULL_REQUEST) {
-              node tests\legacy-cli\run_e2e.js "--glob={tests/basic/**,tests/i18n/extract-ivy*.ts,tests/build/profile.ts}" --nb-shards=$env:CIRCLE_NODE_TOTAL --shard=$env:CIRCLE_NODE_INDEX
+              node tests\legacy-cli\run_e2e.js "--glob={tests/basic/**,tests/i18n/extract-ivy*.ts,tests/build/profile.ts,tests/test/test-sourcemap.ts}" --nb-shards=$env:CIRCLE_NODE_TOTAL --shard=$env:CIRCLE_NODE_INDEX
             } else {
               node tests\legacy-cli\run_e2e.js --nb-shards=$env:CIRCLE_NODE_TOTAL --shard=$env:CIRCLE_NODE_INDEX
             }
@@ -323,6 +348,7 @@ workflows:
             - setup
       - e2e-cli:
           name: e2e-cli
+          nodeversion: '14.15'
           post-steps:
             - store_artifacts:
                 path: /tmp/dist
@@ -338,10 +364,12 @@ workflows:
             branches:
               only:
                 - renovate/angular
+                - main
+                # TODO(BRANCH_RENAME_CLEANUP): remove
                 - master
       - e2e-cli:
-          name: e2e-cli-node-12
-          nodeversion: '12.20'
+          name: e2e-cli-node-16
+          nodeversion: '16.10'
           <<: *only_release_branches
           requires:
             - build

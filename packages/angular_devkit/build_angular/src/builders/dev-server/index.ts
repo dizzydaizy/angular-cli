@@ -21,67 +21,33 @@ import webpack from 'webpack';
 import webpackDevServer from 'webpack-dev-server';
 import { ExecutionTransformer } from '../../transforms';
 import { normalizeOptimization } from '../../utils';
-import { findCachePath } from '../../utils/cache-path';
 import { checkPort } from '../../utils/check-port';
 import { colors } from '../../utils/color';
-import { I18nOptions } from '../../utils/i18n-options';
+import { I18nOptions, loadTranslations } from '../../utils/i18n-options';
 import { IndexHtmlTransform } from '../../utils/index-file/index-html-generator';
+import { createTranslationLoader } from '../../utils/load-translations';
+import { NormalizedCachedOptions, normalizeCacheOptions } from '../../utils/normalize-cache';
 import { generateEntryPoints } from '../../utils/package-chunk-sort';
-import { readTsconfig } from '../../utils/read-tsconfig';
+import { purgeStaleBuildCache } from '../../utils/purge-cache';
 import { assertCompatibleAngularVersion } from '../../utils/version';
 import {
   generateI18nBrowserWebpackConfigFromContext,
   getIndexInputFile,
   getIndexOutputFile,
 } from '../../utils/webpack-browser-config';
+import { addError, addWarning } from '../../utils/webpack-diagnostics';
 import {
   getAnalyticsConfig,
-  getBrowserConfig,
   getCommonConfig,
   getDevServerConfig,
-  getStatsConfig,
   getStylesConfig,
-  getTypeScriptConfig,
-  getWorkerConfig,
 } from '../../webpack/configs';
 import { IndexHtmlWebpackPlugin } from '../../webpack/plugins/index-html-webpack-plugin';
 import { createWebpackLoggingCallback } from '../../webpack/utils/stats';
 import { Schema as BrowserBuilderSchema, OutputHashing } from '../browser/schema';
 import { Schema } from './schema';
 
-export type DevServerBuilderOptions = Schema & json.JsonObject;
-
-const devServerBuildOverriddenKeys: (keyof DevServerBuilderOptions)[] = [
-  'watch',
-  'optimization',
-  'aot',
-  'sourceMap',
-  'vendorChunk',
-  'commonChunk',
-  'baseHref',
-  'progress',
-  'poll',
-  'verbose',
-  'deployUrl',
-];
-
-// Get dev-server only options.
-type DevServerOptions = Partial<
-  Omit<
-    Schema,
-    | 'watch'
-    | 'optimization'
-    | 'aot'
-    | 'sourceMap'
-    | 'vendorChunk'
-    | 'commonChunk'
-    | 'baseHref'
-    | 'progress'
-    | 'poll'
-    | 'verbose'
-    | 'deployUrl'
-  >
->;
+export type DevServerBuilderOptions = Schema;
 
 /**
  * @experimental Direct usage of this type is considered experimental.
@@ -116,46 +82,19 @@ export function serveWebpackBrowser(
   const browserTarget = targetFromTargetString(options.browserTarget);
 
   async function setup(): Promise<{
-    browserOptions: json.JsonObject & BrowserBuilderSchema;
+    browserOptions: BrowserBuilderSchema;
     webpackConfig: webpack.Configuration;
     projectRoot: string;
-    locale: string | undefined;
   }> {
-    // Get the browser configuration from the target name.
-    const rawBrowserOptions = (await context.getTargetOptions(browserTarget)) as json.JsonObject &
-      BrowserBuilderSchema;
-    options.port = await checkPort(options.port ?? 4200, options.host || 'localhost');
-
-    // Override options we need to override, if defined.
-    const overrides = (Object.keys(options) as (keyof DevServerBuilderOptions)[])
-      .filter((key) => options[key] !== undefined && devServerBuildOverriddenKeys.includes(key))
-      .reduce<json.JsonObject & Partial<BrowserBuilderSchema>>(
-        (previous, key) => ({
-          ...previous,
-          [key]: options[key],
-        }),
-        {},
-      );
-
-    const devServerOptions: DevServerOptions = (Object.keys(options) as (keyof Schema)[])
-      .filter((key) => !devServerBuildOverriddenKeys.includes(key) && key !== 'browserTarget')
-      .reduce<DevServerOptions>(
-        (previous, key) => ({
-          ...previous,
-          [key]: options[key],
-        }),
-        {},
-      );
-
-    // In dev server we should not have budgets because of extra libs such as socks-js
-    overrides.budgets = undefined;
-
-    if (rawBrowserOptions.outputHashing && rawBrowserOptions.outputHashing !== OutputHashing.None) {
-      // Disable output hashing for dev build as this can cause memory leaks
-      // See: https://github.com/webpack/webpack-dev-server/issues/377#issuecomment-241258405
-      overrides.outputHashing = OutputHashing.None;
-      logger.warn(`Warning: 'outputHashing' option is disabled when using the dev-server.`);
+    const projectName = context.target?.project;
+    if (!projectName) {
+      throw new Error('The builder requires a target.');
     }
+
+    // Purge old build disk cache.
+    await purgeStaleBuildCache(context);
+
+    options.port = await checkPort(options.port ?? 4200, options.host || 'localhost');
 
     if (options.hmr) {
       logger.warn(tags.stripIndents`NOTICE: Hot Module Replacement (HMR) is enabled for the dev server.
@@ -186,14 +125,29 @@ export function serveWebpackBrowser(
         for more information.
       `);
     }
+    // Get the browser configuration from the target name.
+    const rawBrowserOptions = (await context.getTargetOptions(browserTarget)) as json.JsonObject &
+      BrowserBuilderSchema;
 
-    // Webpack's live reload functionality adds the `strip-ansi` package which is commonJS
-    rawBrowserOptions.allowedCommonJsDependencies ??= [];
-    rawBrowserOptions.allowedCommonJsDependencies.push('strip-ansi');
+    if (rawBrowserOptions.outputHashing && rawBrowserOptions.outputHashing !== OutputHashing.None) {
+      // Disable output hashing for dev build as this can cause memory leaks
+      // See: https://github.com/webpack/webpack-dev-server/issues/377#issuecomment-241258405
+      rawBrowserOptions.outputHashing = OutputHashing.None;
+      logger.warn(`Warning: 'outputHashing' option is disabled when using the dev-server.`);
+    }
+
+    const metadata = await context.getProjectMetadata(projectName);
+    const cacheOptions = normalizeCacheOptions(metadata, context.workspaceRoot);
 
     const browserName = await context.getBuilderNameForTarget(browserTarget);
     const browserOptions = (await context.validateOptions(
-      { ...rawBrowserOptions, ...overrides },
+      {
+        ...rawBrowserOptions,
+        watch: options.watch,
+        verbose: options.verbose,
+        // In dev server we should not have budgets because of extra libs such as socks-js
+        budgets: undefined,
+      } as json.JsonObject & BrowserBuilderSchema,
       browserName,
     )) as json.JsonObject & BrowserBuilderSchema;
 
@@ -215,52 +169,14 @@ export function serveWebpackBrowser(
       (wco) => [
         getDevServerConfig(wco),
         getCommonConfig(wco),
-        getBrowserConfig(wco),
         getStylesConfig(wco),
-        getStatsConfig(wco),
         getAnalyticsConfig(wco, context),
-        getTypeScriptConfig(wco),
-        browserOptions.webWorkerTsConfig ? getWorkerConfig(wco) : {},
       ],
-      devServerOptions,
+      options,
     );
 
     if (!config.devServer) {
       throw new Error('Webpack Dev Server configuration was not set.');
-    }
-
-    if (options.liveReload && !options.hmr) {
-      // This is needed because we cannot use the inline option directly in the config
-      // because of the SuppressExtractedTextChunksWebpackPlugin
-      // Consider not using SuppressExtractedTextChunksWebpackPlugin when liveReload is enable.
-      webpackDevServer.addDevServerEntrypoints(config, {
-        ...config.devServer,
-        inline: true,
-      });
-
-      // Remove live-reload code from all entrypoints but not main.
-      // Otherwise this will break SuppressExtractedTextChunksWebpackPlugin because
-      // 'addDevServerEntrypoints' adds addional entry-points to all entries.
-      if (
-        config.entry &&
-        typeof config.entry === 'object' &&
-        !Array.isArray(config.entry) &&
-        config.entry.main
-      ) {
-        for (const [key, value] of Object.entries(config.entry)) {
-          if (key === 'main' || !Array.isArray(value)) {
-            continue;
-          }
-
-          const webpackClientScriptIndex = value.findIndex((x) =>
-            x.includes('webpack-dev-server/client/index.js'),
-          );
-          if (webpackClientScriptIndex >= 0) {
-            // Remove the webpack-dev-server/client script from array.
-            value.splice(webpackClientScriptIndex, 1);
-          }
-        }
-      }
     }
 
     let locale: string | undefined;
@@ -276,61 +192,57 @@ export function serveWebpackBrowser(
 
     // If a locale is defined, setup localization
     if (locale) {
-      // Only supported with Ivy
-      const tsConfig = readTsconfig(browserOptions.tsConfig, workspaceRoot);
-      if (tsConfig.options.enableIvy !== false) {
-        if (i18n.inlineLocales.size > 1) {
-          throw new Error(
-            'The development server only supports localizing a single locale per build.',
-          );
-        }
-
-        await setupLocalize(locale, i18n, browserOptions, webpackConfig);
+      if (i18n.inlineLocales.size > 1) {
+        throw new Error(
+          'The development server only supports localizing a single locale per build.',
+        );
       }
+
+      await setupLocalize(locale, i18n, browserOptions, webpackConfig, cacheOptions, context);
     }
 
     if (transforms.webpackConfiguration) {
       webpackConfig = await transforms.webpackConfiguration(webpackConfig);
     }
 
+    if (browserOptions.index) {
+      const { scripts = [], styles = [], baseHref } = browserOptions;
+      const entrypoints = generateEntryPoints({
+        scripts,
+        styles,
+        // The below is needed as otherwise HMR for CSS will break.
+        // styles.js and runtime.js needs to be loaded as a non-module scripts as otherwise `document.currentScript` will be null.
+        // https://github.com/webpack-contrib/mini-css-extract-plugin/blob/90445dd1d81da0c10b9b0e8a17b417d0651816b8/src/hmr/hotModuleReplacement.js#L39
+        isHMREnabled: !!webpackConfig.devServer?.hot,
+      });
+
+      webpackConfig.plugins ??= [];
+      webpackConfig.plugins.push(
+        new IndexHtmlWebpackPlugin({
+          indexPath: path.resolve(workspaceRoot, getIndexInputFile(browserOptions.index)),
+          outputPath: getIndexOutputFile(browserOptions.index),
+          baseHref,
+          entrypoints,
+          deployUrl: browserOptions.deployUrl,
+          sri: browserOptions.subresourceIntegrity,
+          cache: cacheOptions,
+          postTransform: transforms.indexHtml,
+          optimization: normalizeOptimization(browserOptions.optimization),
+          crossOrigin: browserOptions.crossOrigin,
+          lang: locale,
+        }),
+      );
+    }
+
     return {
       browserOptions,
       webpackConfig,
       projectRoot,
-      locale,
     };
   }
 
   return from(setup()).pipe(
-    switchMap(({ browserOptions, webpackConfig, locale }) => {
-      if (browserOptions.index) {
-        const { scripts = [], styles = [], baseHref } = browserOptions;
-        const entrypoints = generateEntryPoints({
-          scripts,
-          styles,
-          // The below is needed as otherwise HMR for CSS will break.
-          // styles.js and runtime.js needs to be loaded as a non-module scripts as otherwise `document.currentScript` will be null.
-          // https://github.com/webpack-contrib/mini-css-extract-plugin/blob/90445dd1d81da0c10b9b0e8a17b417d0651816b8/src/hmr/hotModuleReplacement.js#L39
-          isHMREnabled: webpackConfig.devServer?.hot,
-        });
-
-        webpackConfig.plugins ??= [];
-        webpackConfig.plugins.push(
-          new IndexHtmlWebpackPlugin({
-            indexPath: path.resolve(workspaceRoot, getIndexInputFile(browserOptions.index)),
-            outputPath: getIndexOutputFile(browserOptions.index),
-            baseHref,
-            entrypoints,
-            deployUrl: browserOptions.deployUrl,
-            sri: browserOptions.subresourceIntegrity,
-            postTransform: transforms.indexHtml,
-            optimization: normalizeOptimization(browserOptions.optimization),
-            crossOrigin: browserOptions.crossOrigin,
-            lang: locale,
-          }),
-        );
-      }
-
+    switchMap(({ browserOptions, webpackConfig }) => {
       return runWebpackDevServer(webpackConfig, context, {
         logging: transforms.logging || createWebpackLoggingCallback(browserOptions, logger),
         webpackFactory: require('webpack') as typeof webpack,
@@ -338,11 +250,13 @@ export function serveWebpackBrowser(
       }).pipe(
         concatMap(async (buildEvent, index) => {
           // Resolve serve address.
+          const publicPath = webpackConfig.devServer?.devMiddleware?.publicPath;
+
           const serverAddress = url.format({
             protocol: options.ssl ? 'https' : 'http',
             hostname: options.host === '0.0.0.0' ? 'localhost' : options.host,
-            pathname: webpackConfig.devServer?.publicPath,
             port: buildEvent.port,
+            pathname: typeof publicPath === 'string' ? publicPath : undefined,
           });
 
           if (index === 0) {
@@ -365,6 +279,8 @@ export function serveWebpackBrowser(
 
           if (buildEvent.success) {
             logger.info(`\n${colors.greenBright(colors.symbols.check)} Compiled successfully.`);
+          } else {
+            logger.info(`\n${colors.redBright(colors.symbols.cross)} Failed to compile.`);
           }
 
           return { ...buildEvent, baseUrl: serverAddress } as DevServerBuilderOutput;
@@ -379,6 +295,8 @@ async function setupLocalize(
   i18n: I18nOptions,
   browserOptions: BrowserBuilderSchema,
   webpackConfig: webpack.Configuration,
+  cacheOptions: NormalizedCachedOptions,
+  context: BuilderContext,
 ) {
   const localeDescription = i18n.locales[locale];
 
@@ -411,16 +329,21 @@ async function setupLocalize(
     locale,
     missingTranslationBehavior,
     translation: i18n.shouldInline ? translation : undefined,
+    translationFiles: localeDescription?.files.map((file) =>
+      path.resolve(context.workspaceRoot, file.path),
+    ),
   };
 
   const i18nRule: webpack.RuleSetRule = {
-    test: /\.(?:[cm]?js|ts)$/,
+    test: /\.[cm]?[tj]sx?$/,
     enforce: 'post',
     use: [
       {
         loader: require.resolve('../../babel/webpack-loader'),
         options: {
-          cacheDirectory: findCachePath('babel-dev-server-i18n'),
+          cacheDirectory:
+            (cacheOptions.enabled && path.join(cacheOptions.path, 'babel-dev-server-i18n')) ||
+            false,
           cacheIdentifier: JSON.stringify({
             locale,
             translationIntegrity: localeDescription?.files.map((file) => file.integrity),
@@ -440,6 +363,42 @@ async function setupLocalize(
   }
 
   rules.push(i18nRule);
+
+  // Add a plugin to reload translation files on rebuilds
+  const loader = await createTranslationLoader();
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  webpackConfig.plugins!.push({
+    apply: (compiler: webpack.Compiler) => {
+      compiler.hooks.thisCompilation.tap('build-angular', (compilation) => {
+        if (i18n.shouldInline && i18nLoaderOptions.translation === undefined) {
+          // Reload translations
+          loadTranslations(
+            locale,
+            localeDescription,
+            context.workspaceRoot,
+            loader,
+            {
+              warn(message) {
+                addWarning(compilation, message);
+              },
+              error(message) {
+                addError(compilation, message);
+              },
+            },
+            undefined,
+            browserOptions.i18nDuplicateTranslation,
+          );
+
+          i18nLoaderOptions.translation = localeDescription.translation ?? {};
+        }
+
+        compilation.hooks.finishModules.tap('build-angular', () => {
+          // After loaders are finished, clear out the now unneeded translations
+          i18nLoaderOptions.translation = undefined;
+        });
+      });
+    },
+  });
 }
 
 export default createBuilder<DevServerBuilderOptions, DevServerBuilderOutput>(serveWebpackBrowser);

@@ -22,8 +22,7 @@ import * as path from 'path';
 import { workerData } from 'worker_threads';
 import { allowMinify, shouldBeautify } from './environment-options';
 import { I18nOptions } from './i18n-options';
-
-type LocalizeUtilities = typeof import('@angular/localize/src/tools/src/source_file_utils');
+import { loadEsmModule } from './load-esm';
 
 // Extract Sourcemap input type from the remapping function since it is not currently exported
 type SourceMapInput = Exclude<Parameters<typeof remapping>[0], unknown[]>;
@@ -34,7 +33,36 @@ let webpackSources: typeof import('webpack').sources | undefined;
 
 const { i18n } = (workerData || {}) as { i18n?: I18nOptions };
 
+/**
+ * Internal flag to enable the direct usage of the `@angular/localize` translation plugins.
+ * Their usage is currently several times slower than the string manipulation method.
+ * Future work to optimize the plugins should enable plugin usage as the default.
+ */
 const USE_LOCALIZE_PLUGINS = false;
+
+type LocalizeUtilityModule = typeof import('@angular/localize/tools');
+
+/**
+ * Cached instance of the `@angular/localize/tools` module.
+ * This is used to remove the need to repeatedly import the module per file translation.
+ */
+let localizeToolsModule: LocalizeUtilityModule | undefined;
+
+/**
+ * Attempts to load the `@angular/localize/tools` module containing the functionality to
+ * perform the file translations.
+ * This module must be dynamically loaded as it is an ESM module and this file is CommonJS.
+ */
+async function loadLocalizeTools(): Promise<LocalizeUtilityModule> {
+  if (localizeToolsModule !== undefined) {
+    return localizeToolsModule;
+  }
+
+  // Load ESM `@angular/localize/tools` using the TypeScript dynamic import workaround.
+  // Once TypeScript provides support for keeping the dynamic import this workaround can be
+  // changed to a direct dynamic import.
+  return loadEsmModule('@angular/localize/tools');
+}
 
 export async function createI18nPlugins(
   locale: string,
@@ -43,37 +71,29 @@ export async function createI18nPlugins(
   shouldInline: boolean,
   localeDataContent?: string,
 ) {
-  const plugins = [];
-  const localizeDiag = await import('@angular/localize/src/tools/src/diagnostics');
+  const { Diagnostics, makeEs2015TranslatePlugin, makeEs5TranslatePlugin, makeLocalePlugin } =
+    await loadLocalizeTools();
 
-  const diagnostics = new localizeDiag.Diagnostics();
+  const plugins = [];
+  const diagnostics = new Diagnostics();
 
   if (shouldInline) {
-    const es2015 = await import(
-      '@angular/localize/src/tools/src/translate/source_files/es2015_translate_plugin'
-    );
     plugins.push(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      es2015.makeEs2015TranslatePlugin(diagnostics, (translation || {}) as any, {
+      makeEs2015TranslatePlugin(diagnostics, (translation || {}) as any, {
         missingTranslation: translation === undefined ? 'ignore' : missingTranslation,
       }),
     );
 
-    const es5 = await import(
-      '@angular/localize/src/tools/src/translate/source_files/es5_translate_plugin'
-    );
     plugins.push(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      es5.makeEs5TranslatePlugin(diagnostics, (translation || {}) as any, {
+      makeEs5TranslatePlugin(diagnostics, (translation || {}) as any, {
         missingTranslation: translation === undefined ? 'ignore' : missingTranslation,
       }),
     );
   }
 
-  const inlineLocale = await import(
-    '@angular/localize/src/tools/src/translate/source_files/locale_plugin'
-  );
-  plugins.push(inlineLocale.makeLocalePlugin(locale));
+  plugins.push(makeLocalePlugin(locale));
 
   if (localeDataContent) {
     plugins.push({
@@ -120,6 +140,8 @@ export async function inlineLocales(options: InlineOptions) {
     return inlineCopyOnly(options);
   }
 
+  await loadLocalizeTools();
+
   let ast: ParseResult | undefined | null;
   try {
     ast = parseSync(options.code, {
@@ -134,7 +156,7 @@ export async function inlineLocales(options: InlineOptions) {
       // Same errors will contain the full content of the file as the error message
       // Which makes it hard to find the actual error message.
       const index = error.message.indexOf(')\n');
-      const msg = index !== -1 ? error.message.substr(0, index + 1) : error.message;
+      const msg = index !== -1 ? error.message.slice(0, index + 1) : error.message;
       throw new Error(`${msg}\nAn error occurred inlining file "${options.filename}"`);
     }
   }
@@ -210,13 +232,10 @@ async function inlineLocalesDirect(ast: ParseResult, options: InlineOptions) {
   }
 
   const { default: generate } = await import('@babel/generator');
-
-  const utils = await import('@angular/localize/src/tools/src/source_file_utils');
-  const localizeDiag = await import('@angular/localize/src/tools/src/diagnostics');
-
+  const localizeDiag = await loadLocalizeTools();
   const diagnostics = new localizeDiag.Diagnostics();
 
-  const positions = findLocalizePositions(ast, options, utils);
+  const positions = findLocalizePositions(ast, options, localizeDiag);
   if (positions.length === 0 && !options.setLocale) {
     return inlineCopyOnly(options);
   }
@@ -245,7 +264,7 @@ async function inlineLocalesDirect(ast: ParseResult, options: InlineOptions) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const translations: any = isSourceLocale ? {} : i18n.locales[locale].translation || {};
     for (const position of positions) {
-      const translated = utils.translate(
+      const translated = localizeDiag.translate(
         diagnostics,
         translations,
         position.messageParts,
@@ -253,7 +272,7 @@ async function inlineLocalesDirect(ast: ParseResult, options: InlineOptions) {
         isSourceLocale ? 'ignore' : options.missingTranslation || 'warning',
       );
 
-      const expression = utils.buildLocalizeReplacement(translated[0], translated[1]);
+      const expression = localizeDiag.buildLocalizeReplacement(translated[0], translated[1]);
       const { code } = generate(expression);
 
       content.replace(position.start, position.end - 1, code);
@@ -323,7 +342,7 @@ function inlineCopyOnly(options: InlineOptions) {
 function findLocalizePositions(
   ast: ParseResult,
   options: InlineOptions,
-  utils: LocalizeUtilities,
+  utils: LocalizeUtilityModule,
 ): LocalizePosition[] {
   const positions: LocalizePosition[] = [];
 
@@ -375,7 +394,7 @@ function findLocalizePositions(
 
 function unwrapTemplateLiteral(
   path: NodePath<types.TaggedTemplateExpression>,
-  utils: LocalizeUtilities,
+  utils: LocalizeUtilityModule,
 ): [TemplateStringsArray, types.Expression[]] {
   const [messageParts] = utils.unwrapMessagePartsFromTemplateLiteral(
     path.get('quasi').get('quasis'),
@@ -387,7 +406,7 @@ function unwrapTemplateLiteral(
 
 function unwrapLocalizeCall(
   path: NodePath<types.CallExpression>,
-  utils: LocalizeUtilities,
+  utils: LocalizeUtilityModule,
 ): [TemplateStringsArray, types.Expression[]] {
   const [messageParts] = utils.unwrapMessagePartsFromLocalizeCall(path);
   const [expressions] = utils.unwrapSubstitutionsFromLocalizeCall(path);

@@ -8,7 +8,7 @@
 
 import { BuilderContext, BuilderOutput, createBuilder } from '@angular-devkit/architect';
 import { EmittedFiles, WebpackLoggingCallback, runWebpack } from '@angular-devkit/build-webpack';
-import { getSystemPath, json, logging, normalize, resolve } from '@angular-devkit/core';
+import { logging } from '@angular-devkit/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Observable, from } from 'rxjs';
@@ -17,13 +17,16 @@ import { ScriptTarget } from 'typescript';
 import webpack from 'webpack';
 import { ExecutionTransformer } from '../../transforms';
 import {
-  BuildBrowserFeatures,
   deleteOutputDir,
   normalizeAssetPatterns,
   normalizeOptimization,
   urlJoin,
 } from '../../utils';
-import { ThresholdSeverity, checkBudgets } from '../../utils/bundle-calculator';
+import {
+  BudgetCalculatorResult,
+  ThresholdSeverity,
+  checkBudgets,
+} from '../../utils/bundle-calculator';
 import { colors } from '../../utils/color';
 import { copyAssets } from '../../utils/copy-assets';
 import { i18nInlineEmittedFiles } from '../../utils/i18n-inlining';
@@ -33,26 +36,20 @@ import {
   IndexHtmlGenerator,
   IndexHtmlTransform,
 } from '../../utils/index-file/index-html-generator';
+import { normalizeCacheOptions } from '../../utils/normalize-cache';
 import { ensureOutputPaths } from '../../utils/output-paths';
 import { generateEntryPoints } from '../../utils/package-chunk-sort';
-import { readTsconfig } from '../../utils/read-tsconfig';
+import { purgeStaleBuildCache } from '../../utils/purge-cache';
 import { augmentAppWithServiceWorker } from '../../utils/service-worker';
 import { Spinner } from '../../utils/spinner';
+import { getSupportedBrowsers } from '../../utils/supported-browsers';
 import { assertCompatibleAngularVersion } from '../../utils/version';
 import {
   generateI18nBrowserWebpackConfigFromContext,
   getIndexInputFile,
   getIndexOutputFile,
 } from '../../utils/webpack-browser-config';
-import {
-  getAnalyticsConfig,
-  getBrowserConfig,
-  getCommonConfig,
-  getStatsConfig,
-  getStylesConfig,
-  getTypeScriptConfig,
-  getWorkerConfig,
-} from '../../webpack/configs';
+import { getAnalyticsConfig, getCommonConfig, getStylesConfig } from '../../webpack/configs';
 import { markAsyncChunksNonInitial } from '../../webpack/utils/async-chunks';
 import { normalizeExtraEntryPoints } from '../../webpack/utils/helpers';
 import {
@@ -67,15 +64,20 @@ import { Schema as BrowserBuilderSchema } from './schema';
 /**
  * @experimental Direct usage of this type is considered experimental.
  */
-export type BrowserBuilderOutput = json.JsonObject &
-  BuilderOutput & {
-    baseOutputPath: string;
-    outputPaths: string[];
-    /**
-     * @deprecated in version 9. Use 'outputPaths' instead.
-     */
-    outputPath: string;
-  };
+export type BrowserBuilderOutput = BuilderOutput & {
+  baseOutputPath: string;
+  outputPaths: string[];
+  /**
+   * @deprecated in version 9. Use 'outputPaths' instead.
+   */
+  outputPath: string;
+};
+
+/**
+ * Maximum time in milliseconds for single build/rebuild
+ * This accounts for CI variability.
+ */
+export const BUILD_TIMEOUT = 30_000;
 
 async function initialize(
   options: BrowserBuilderSchema,
@@ -86,30 +88,27 @@ async function initialize(
   projectRoot: string;
   projectSourceRoot?: string;
   i18n: I18nOptions;
+  target: ScriptTarget;
 }> {
   const originalOutputPath = options.outputPath;
 
   // Assets are processed directly by the builder except when watching
   const adjustedOptions = options.watch ? options : { ...options, assets: [] };
 
-  const { config, projectRoot, projectSourceRoot, i18n } =
+  const { config, projectRoot, projectSourceRoot, i18n, target } =
     await generateI18nBrowserWebpackConfigFromContext(adjustedOptions, context, (wco) => [
       getCommonConfig(wco),
-      getBrowserConfig(wco),
       getStylesConfig(wco),
-      getStatsConfig(wco),
       getAnalyticsConfig(wco, context),
-      getTypeScriptConfig(wco),
-      wco.buildOptions.webWorkerTsConfig ? getWorkerConfig(wco) : {},
     ]);
 
   // Validate asset option values if processed directly
   if (options.assets?.length && !adjustedOptions.assets?.length) {
     normalizeAssetPatterns(
       options.assets,
-      normalize(context.workspaceRoot),
-      normalize(projectRoot),
-      projectSourceRoot === undefined ? undefined : normalize(projectSourceRoot),
+      context.workspaceRoot,
+      projectRoot,
+      projectSourceRoot,
     ).forEach(({ output }) => {
       if (output.startsWith('..')) {
         throw new Error('An asset cannot be written to a location outside of the output path.');
@@ -126,7 +125,7 @@ async function initialize(
     deleteOutputDir(context.workspaceRoot, originalOutputPath);
   }
 
-  return { config: transformedConfig || config, projectRoot, projectSourceRoot, i18n };
+  return { config: transformedConfig || config, projectRoot, projectSourceRoot, i18n, target };
 }
 
 /**
@@ -142,8 +141,6 @@ export function buildWebpackBrowser(
     indexHtml?: IndexHtmlTransform;
   } = {},
 ): Observable<BrowserBuilderOutput> {
-  const root = normalize(context.workspaceRoot);
-
   const projectName = context.target?.project;
   if (!projectName) {
     throw new Error('The builder requires a target.');
@@ -157,27 +154,23 @@ export function buildWebpackBrowser(
 
   return from(context.getProjectMetadata(projectName)).pipe(
     switchMap(async (projectMetadata) => {
-      const sysProjectRoot = getSystemPath(
-        resolve(
-          normalize(context.workspaceRoot),
-          normalize((projectMetadata.root as string) ?? ''),
-        ),
-      );
+      // Purge old build disk cache.
+      await purgeStaleBuildCache(context);
 
-      const { options: compilerOptions } = readTsconfig(options.tsConfig, context.workspaceRoot);
-      const target = compilerOptions.target || ScriptTarget.ES5;
-      const buildBrowserFeatures = new BuildBrowserFeatures(sysProjectRoot);
+      // Initialize builder
+      const initialization = await initialize(options, context, transforms.webpackConfiguration);
 
-      checkInternetExplorerSupport(buildBrowserFeatures.supportedBrowsers, context.logger);
+      // Check and warn about IE browser support
+      checkInternetExplorerSupport(initialization.projectRoot, context.logger);
 
       return {
-        ...(await initialize(options, context, transforms.webpackConfiguration)),
-        target,
+        ...initialization,
+        cacheOptions: normalizeCacheOptions(projectMetadata, context.workspaceRoot),
       };
     }),
     switchMap(
       // eslint-disable-next-line max-lines-per-function
-      ({ config, projectRoot, projectSourceRoot, i18n, target }) => {
+      ({ config, projectRoot, projectSourceRoot, i18n, target, cacheOptions }) => {
         const normalizedOptimization = normalizeOptimization(options.optimization);
 
         return runWebpack(config, context, {
@@ -249,8 +242,9 @@ export function buildWebpackBrowser(
 
               // Check for budget errors and display them to the user.
               const budgets = options.budgets;
+              let budgetFailures: BudgetCalculatorResult[] | undefined;
               if (budgets?.length) {
-                const budgetFailures = checkBudgets(budgets, webpackStats);
+                budgetFailures = [...checkBudgets(budgets, webpackStats)];
                 for (const { severity, message } of budgetFailures) {
                   switch (severity) {
                     case ThresholdSeverity.Warning:
@@ -274,9 +268,9 @@ export function buildWebpackBrowser(
                     await copyAssets(
                       normalizeAssetPatterns(
                         options.assets,
-                        root,
-                        normalize(projectRoot),
-                        projectSourceRoot === undefined ? undefined : normalize(projectSourceRoot),
+                        context.workspaceRoot,
+                        projectRoot,
+                        projectSourceRoot,
                       ),
                       Array.from(outputPaths.values()),
                       context.workspaceRoot,
@@ -298,6 +292,7 @@ export function buildWebpackBrowser(
                   });
 
                   const indexHtmlGenerator = new IndexHtmlGenerator({
+                    cache: cacheOptions,
                     indexPath: path.join(context.workspaceRoot, getIndexInputFile(options.index)),
                     entrypoints,
                     deployUrl: options.deployUrl,
@@ -352,9 +347,9 @@ export function buildWebpackBrowser(
                   for (const [locale, outputPath] of outputPaths.entries()) {
                     try {
                       await augmentAppWithServiceWorker(
-                        root,
-                        normalize(projectRoot),
-                        normalize(outputPath),
+                        projectRoot,
+                        context.workspaceRoot,
+                        outputPath,
                         getLocaleBaseHref(i18n, locale) || options.baseHref || '/',
                         options.ngswConfigPath,
                       );
@@ -369,7 +364,7 @@ export function buildWebpackBrowser(
                 }
               }
 
-              webpackStatsLogger(context.logger, webpackStats, config);
+              webpackStatsLogger(context.logger, webpackStats, config, budgetFailures);
 
               return { success: buildSuccess };
             }
@@ -430,31 +425,15 @@ function mapEmittedFilesToFileInfo(files: EmittedFiles[] = []): FileInfo[] {
   return filteredFiles;
 }
 
-function checkInternetExplorerSupport(
-  supportedBrowsers: string[],
-  logger: logging.LoggerApi,
-): void {
-  const hasIE9 = supportedBrowsers.includes('ie 9');
-  const hasIE10 = supportedBrowsers.includes('ie 10');
-  const hasIE11 = supportedBrowsers.includes('ie 11');
-
-  if (hasIE9 || hasIE10) {
-    const browsers = (hasIE9 ? 'IE 9' + (hasIE10 ? ' & ' : '') : '') + (hasIE10 ? 'IE 10' : '');
+function checkInternetExplorerSupport(projectRoot: string, logger: logging.LoggerApi): void {
+  const supportedBrowsers = getSupportedBrowsers(projectRoot);
+  if (supportedBrowsers.some((b) => b === 'ie 9' || b === 'ie 10' || b === 'ie 11')) {
     logger.warn(
-      `Warning: Support was requested for ${browsers} in the project's browserslist configuration. ` +
-        (hasIE9 && hasIE10 ? 'These browsers are' : 'This browser is') +
-        ' no longer officially supported with Angular v11 and higher.' +
-        '\nFor more information, see https://v10.angular.io/guide/deprecations#ie-9-10-and-mobile',
-    );
-  }
-
-  if (hasIE11) {
-    logger.warn(
-      `Warning: Support was requested for IE 11 in the project's browserslist configuration. ` +
-        'IE 11 support is deprecated since Angular v12.' +
+      `Warning: Support was requested for Internet Explorer in the project's browserslist configuration. ` +
+        'Internet Explorer is no longer officially supported.' +
         '\nFor more information, see https://angular.io/guide/browser-support',
     );
   }
 }
 
-export default createBuilder<json.JsonObject & BrowserBuilderSchema>(buildWebpackBrowser);
+export default createBuilder<BrowserBuilderSchema>(buildWebpackBrowser);

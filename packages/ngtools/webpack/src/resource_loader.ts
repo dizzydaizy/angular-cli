@@ -6,7 +6,6 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import { createHash } from 'crypto';
 import * as path from 'path';
 import * as vm from 'vm';
 import type { Asset, Compilation } from 'webpack';
@@ -16,6 +15,7 @@ import {
   InlineAngularResourceLoaderPath,
   InlineAngularResourceSymbol,
 } from './loaders/inline-resource';
+import { NG_COMPONENT_RESOURCE_QUERY } from './transformers/replace_resources';
 
 interface CompilationOutput {
   content: string;
@@ -99,10 +99,10 @@ export class WebpackResourceLoader {
     this._reverseDependencies.set(file, new Set(resources));
   }
 
+  // eslint-disable-next-line max-lines-per-function
   private async _compile(
     filePath?: string,
     data?: string,
-    mimeType?: string,
     fileExtension?: string,
     resourceType?: 'style' | 'template',
     containingFile?: string,
@@ -111,17 +111,36 @@ export class WebpackResourceLoader {
       throw new Error('WebpackResourceLoader cannot be used without parentCompilation');
     }
 
-    // Create a special URL for reading the resource from memory
-    const entry =
-      filePath ||
-      (resourceType
-        ? `${containingFile}-${this.outputPathCounter}.${fileExtension}!=!${this.inlineDataLoaderPath}!${containingFile}`
-        : // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-          `angular-resource:${resourceType},${createHash('md5').update(data!).digest('hex')}`);
+    const { context, webpack } = this._parentCompilation.compiler;
+    const {
+      EntryPlugin,
+      NormalModule,
+      library,
+      node,
+      sources,
+      util: { createHash },
+    } = webpack;
 
-    if (!entry) {
-      throw new Error(`"filePath" or "data" must be specified.`);
-    }
+    const getEntry = (): string => {
+      if (filePath) {
+        return `${filePath}?${NG_COMPONENT_RESOURCE_QUERY}`;
+      } else if (resourceType) {
+        return (
+          // app.component.ts-2.css?ngResource!=!@ngtools/webpack/src/loaders/inline-resource.js!app.component.ts
+          `${containingFile}-${this.outputPathCounter}.${fileExtension}` +
+          `?${NG_COMPONENT_RESOURCE_QUERY}!=!${this.inlineDataLoaderPath}!${containingFile}`
+        );
+      } else if (data) {
+        // Create a special URL for reading the resource from memory
+        return `angular-resource:${resourceType},${createHash('xxhash64')
+          .update(data)
+          .digest('hex')}`;
+      }
+
+      throw new Error(`"filePath", "resourceType" or "data" must be specified.`);
+    };
+
+    const entry = getEntry();
 
     // Simple sanity check.
     if (filePath?.match(/\.[jt]s$/)) {
@@ -143,8 +162,6 @@ export class WebpackResourceLoader {
       },
     };
 
-    const { context, webpack } = this._parentCompilation.compiler;
-    const { EntryPlugin, NormalModule, library, node, sources } = webpack;
     const childCompiler = this._parentCompilation.createChildCompiler(
       'angular-compiler:resource',
       outputOptions,
@@ -167,10 +184,6 @@ export class WebpackResourceLoader {
               if (filePath) {
                 resourceData.path = filePath;
                 resourceData.resource = filePath;
-              }
-
-              if (mimeType) {
-                resourceData.data.mimetype = mimeType;
               }
 
               return true;
@@ -209,8 +222,11 @@ export class WebpackResourceLoader {
         () => {
           finalContent = childCompilation.assets[outputFilePath]?.source().toString();
 
-          delete childCompilation.assets[outputFilePath];
-          delete childCompilation.assets[outputFilePath + '.map'];
+          for (const { files } of childCompilation.chunks) {
+            for (const file of files) {
+              childCompilation.deleteAsset(file);
+            }
+          }
         },
       );
     });
@@ -334,7 +350,6 @@ export class WebpackResourceLoader {
 
   async process(
     data: string,
-    mimeType: string | undefined,
     fileExtension: string | undefined,
     resourceType: 'template' | 'style',
     containingFile?: string,
@@ -346,7 +361,6 @@ export class WebpackResourceLoader {
     const compilationResult = await this._compile(
       undefined,
       data,
-      mimeType,
       fileExtension,
       resourceType,
       containingFile,

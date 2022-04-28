@@ -4,6 +4,8 @@
 
 ```ts
 
+/// <reference types="node" />
+
 import { ErrorObject } from 'ajv';
 import { Format } from 'ajv';
 import { Observable } from 'rxjs';
@@ -227,14 +229,6 @@ type FileBufferLike = ArrayBufferLike;
 // @public (undocumented)
 function fileBufferToString(fileBuffer: FileBuffer): string;
 
-declare namespace fs {
-    export {
-        isFile,
-        isDirectory
-    }
-}
-export { fs }
-
 // @public (undocumented)
 function getTypesOfSchema(schema: JsonSchema): Set<string>;
 
@@ -290,12 +284,6 @@ interface HostWatchOptions {
 class IndentLogger extends Logger {
     constructor(name: string, parent?: Logger | null, indentation?: string);
 }
-
-// @public @deprecated (undocumented)
-function isDirectory(filePath: string): boolean;
-
-// @public @deprecated (undocumented)
-function isFile(filePath: string): boolean;
 
 // @public (undocumented)
 function isJobHandler<A extends JsonValue, I extends JsonValue, O extends JsonValue>(value: unknown): value is JobHandler<A, I, O>;

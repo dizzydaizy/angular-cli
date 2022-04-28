@@ -6,7 +6,7 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import { ImporterReturnType, Options, renderSync } from 'sass';
+import { ImporterResult, LegacyOptions as Options, renderSync } from 'sass';
 import { MessagePort, parentPort, receiveMessageOnPort, workerData } from 'worker_threads';
 
 /**
@@ -18,46 +18,27 @@ interface RenderRequestMessage {
    * importer on the main thread.
    */
   id: number;
-
   /**
    * The Sass options to provide to the `dart-sass` render function.
    */
-  options: Options;
-
+  options: Options<'sync'>;
   /**
    * Indicates the request has a custom importer function on the main thread.
    */
   hasImporter: boolean;
-
-  /**
-   * Indicates this is not an init message.
-   */
-  init: undefined;
 }
 
-interface InitMessage {
-  init: true;
-  workerImporterPort: MessagePort;
-  importerSignal: Int32Array;
-}
-
-if (!parentPort) {
+if (!parentPort || !workerData) {
   throw new Error('Sass worker must be executed as a Worker.');
 }
 
 // The importer variables are used to proxy import requests to the main thread
-let { workerImporterPort, importerSignal } = (workerData || {}) as InitMessage;
+const { workerImporterPort, importerSignal } = workerData as {
+  workerImporterPort: MessagePort;
+  importerSignal: Int32Array;
+};
 
-parentPort.on('message', (message: RenderRequestMessage | InitMessage) => {
-  // The init message is only needed to support Node.js < 12.17 and can be removed once support is dropped
-  if (message.init) {
-    workerImporterPort = message.workerImporterPort;
-    importerSignal = message.importerSignal;
-
-    return;
-  }
-
-  const { id, hasImporter, options } = message;
+parentPort.on('message', ({ id, hasImporter, options }: RenderRequestMessage) => {
   try {
     if (hasImporter) {
       // When a custom importer function is present, the importer request must be proxied
@@ -67,12 +48,11 @@ parentPort.on('message', (message: RenderRequestMessage | InitMessage) => {
       // `receiveMessageOnPort` function are used to ensure synchronous behavior.
       options.importer = function (url, prev) {
         Atomics.store(importerSignal, 0, 0);
-        // `this.fromImport` was added in dart-sass in 1.33.0, `@types/sass` doesn't include it yet.
-        const { fromImport } = this as { fromImport: boolean };
+        const { fromImport } = this;
         workerImporterPort.postMessage({ id, url, prev, fromImport });
         Atomics.wait(importerSignal, 0, 0);
 
-        return receiveMessageOnPort(workerImporterPort)?.message as ImporterReturnType;
+        return receiveMessageOnPort(workerImporterPort)?.message as ImporterResult;
       };
     }
 

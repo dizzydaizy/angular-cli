@@ -22,7 +22,8 @@
     },
     "defaultProject": {
       "type": "string",
-      "description": "Default project name used in commands."
+      "description": "Default project name used in commands.",
+      "x-deprecated": "The project to use will be determined from the current working directory."
     },
     "projects": {
       "type": "object",
@@ -42,7 +43,16 @@
       "properties": {
         "defaultCollection": {
           "description": "The default schematics collection to use.",
-          "type": "string"
+          "type": "string",
+          "x-deprecated": "Use 'schematicCollections' instead."
+        },
+        "schematicCollections": {
+          "type": "array",
+          "description": "The list of schematic collections to use.",
+          "items": {
+            "type": "string",
+            "uniqueItems": true
+          }
         },
         "packageManager": {
           "description": "Specify which package manager tool to use.",
@@ -69,10 +79,30 @@
             "tracking": {
               "description": "Analytics sharing info tracking ID.",
               "type": "string",
-              "pattern": "^GA-\\d+-\\d+$"
+              "pattern": "^(GA|UA)?-\\d+-\\d+$"
             },
             "uuid": {
               "description": "Analytics sharing info universally unique identifier.",
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "cache": {
+          "description": "Control disk cache.",
+          "type": "object",
+          "properties": {
+            "environment": {
+              "description": "Configure in which environment disk cache is enabled.",
+              "type": "string",
+              "enum": ["local", "ci", "all"]
+            },
+            "enabled": {
+              "description": "Configure whether disk caching is enabled.",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "Cache base path.",
               "type": "string"
             }
           }
@@ -139,7 +169,19 @@
       "type": "object",
       "properties": {
         "cli": {
-          "$ref": "#/definitions/cliOptions"
+          "defaultCollection": {
+            "description": "The default schematics collection to use.",
+            "type": "string",
+            "x-deprecated": "Use 'schematicCollections' instead."
+          },
+          "schematicCollections": {
+            "type": "array",
+            "description": "The list of schematic collections to use.",
+            "items": {
+              "type": "string",
+              "uniqueItems": true
+            }
+          }
         },
         "schematics": {
           "$ref": "#/definitions/schematicOptions"

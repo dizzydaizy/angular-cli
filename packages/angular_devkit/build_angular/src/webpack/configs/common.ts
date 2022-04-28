@@ -6,93 +6,102 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import {
-  BuildOptimizerWebpackPlugin,
-  buildOptimizerLoaderPath,
-} from '@angular-devkit/build-optimizer';
-import {
-  GLOBAL_DEFS_FOR_TERSER,
-  GLOBAL_DEFS_FOR_TERSER_WITH_AOT,
-  VERSION as NG_VERSION,
-} from '@angular/compiler-cli';
-import CopyWebpackPlugin, { ObjectPattern } from 'copy-webpack-plugin';
-import { createHash } from 'crypto';
-import { createWriteStream, existsSync, promises as fsPromises } from 'fs';
+import { AngularWebpackLoaderPath } from '@ngtools/webpack';
+import CopyWebpackPlugin from 'copy-webpack-plugin';
 import * as path from 'path';
 import { ScriptTarget } from 'typescript';
 import {
   Compiler,
   Configuration,
   ContextReplacementPlugin,
-  ProgressPlugin,
   RuleSetRule,
-  WebpackOptionsNormalized,
-  debug,
+  SourceMapDevToolPlugin,
 } from 'webpack';
-import { AssetPatternClass } from '../../builders/browser/schema';
-import { BuildBrowserFeatures } from '../../utils';
+import { SubresourceIntegrityPlugin } from 'webpack-subresource-integrity';
+import { AngularBabelLoaderOptions } from '../../babel/webpack-loader';
 import { WebpackConfigOptions } from '../../utils/build-options';
-import { findCachePath } from '../../utils/cache-path';
+import { allowMangle } from '../../utils/environment-options';
+import { loadEsmModule } from '../../utils/load-esm';
 import {
-  allowMangle,
-  allowMinify,
-  cachingDisabled,
-  maxWorkers,
-  persistentBuildCacheEnabled,
-  profilingEnabled,
-} from '../../utils/environment-options';
-import { Spinner } from '../../utils/spinner';
-import { addError } from '../../utils/webpack-diagnostics';
-import { DedupeModuleResolvePlugin, ScriptsWebpackPlugin } from '../plugins';
-import { JavaScriptOptimizerPlugin } from '../plugins/javascript-optimizer-plugin';
-import { getOutputHashFormat, getWatchOptions, normalizeExtraEntryPoints } from '../utils/helpers';
+  CommonJsUsageWarnPlugin,
+  DedupeModuleResolvePlugin,
+  JavaScriptOptimizerPlugin,
+  JsonStatsPlugin,
+  ScriptsWebpackPlugin,
+} from '../plugins';
+import { NamedChunksPlugin } from '../plugins/named-chunks-plugin';
+import { ProgressPlugin } from '../plugins/progress-plugin';
+import { TransferSizePlugin } from '../plugins/transfer-size-plugin';
+import { createIvyPlugin } from '../plugins/typescript';
+import {
+  assetPatterns,
+  externalizePackages,
+  getCacheSettings,
+  getInstrumentationExcludedPaths,
+  getMainFieldsAndConditionNames,
+  getOutputHashFormat,
+  getStatsOptions,
+  globalScriptsByBundleName,
+} from '../utils/helpers';
 
 // eslint-disable-next-line max-lines-per-function
-export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
-  const { root, projectRoot, buildOptions, tsConfig } = wco;
+export async function getCommonConfig(wco: WebpackConfigOptions): Promise<Configuration> {
   const {
+    root,
+    projectRoot,
+    buildOptions,
+    tsConfig,
+    projectName,
+    sourceRoot,
+    tsConfigPath,
+    scriptTarget,
+  } = wco;
+  const {
+    cache,
+    codeCoverage,
+    crossOrigin = 'none',
     platform = 'browser',
-    sourceMap: { styles: stylesSourceMap, scripts: scriptsSourceMap, vendor: vendorSourceMap },
+    aot = true,
+    codeCoverageExclude = [],
+    main,
+    polyfills,
+    sourceMap: {
+      styles: stylesSourceMap,
+      scripts: scriptsSourceMap,
+      vendor: vendorSourceMap,
+      hidden: hiddenSourceMap,
+    },
     optimization: { styles: stylesOptimization, scripts: scriptsOptimization },
+    commonChunk,
+    vendorChunk,
+    subresourceIntegrity,
+    verbose,
+    poll,
+    webWorkerTsConfig,
+    externalDependencies = [],
+    allowedCommonJsDependencies,
+    bundleDependencies,
   } = buildOptions;
 
+  const isPlatformServer = buildOptions.platform === 'server';
   const extraPlugins: { apply(compiler: Compiler): void }[] = [];
   const extraRules: RuleSetRule[] = [];
   const entryPoints: { [key: string]: [string, ...string[]] } = {};
 
+  // Load ESM `@angular/compiler-cli` using the TypeScript dynamic import workaround.
+  // Once TypeScript provides support for keeping the dynamic import this workaround can be
+  // changed to a direct dynamic import.
+  const {
+    GLOBAL_DEFS_FOR_TERSER,
+    GLOBAL_DEFS_FOR_TERSER_WITH_AOT,
+    VERSION: NG_VERSION,
+  } = await loadEsmModule<typeof import('@angular/compiler-cli')>('@angular/compiler-cli');
+
   // determine hashing format
-  const hashFormat = getOutputHashFormat(buildOptions.outputHashing || 'none');
-  const buildBrowserFeatures = new BuildBrowserFeatures(projectRoot);
+  const hashFormat = getOutputHashFormat(buildOptions.outputHashing);
 
   if (buildOptions.progress) {
-    const spinner = new Spinner();
-    spinner.start(`Generating ${platform} application bundles (phase: setup)...`);
-
-    extraPlugins.push(
-      new ProgressPlugin({
-        handler: (percentage: number, message: string) => {
-          const phase = message ? ` (phase: ${message})` : '';
-          spinner.text = `Generating ${platform} application bundles${phase}...`;
-
-          switch (percentage) {
-            case 1:
-              if (spinner.isSpinning) {
-                spinner.succeed(
-                  `${platform.replace(/^\w/, (s) =>
-                    s.toUpperCase(),
-                  )} application bundle generation complete.`,
-                );
-              }
-              break;
-            case 0:
-              if (!spinner.isSpinning) {
-                spinner.start();
-              }
-              break;
-          }
-        },
-      }),
-    );
+    extraPlugins.push(new ProgressPlugin(platform));
   }
 
   if (buildOptions.main) {
@@ -100,7 +109,12 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
     entryPoints['main'] = [mainPath];
   }
 
-  if (platform !== 'server') {
+  if (isPlatformServer) {
+    // Fixes Critical dependency: the request of a dependency is an expression
+    extraPlugins.push(new ContextReplacementPlugin(/@?hapi|express[\\/]/));
+  }
+
+  if (!isPlatformServer) {
     if (buildOptions.polyfills) {
       const projectPolyfills = path.resolve(root, buildOptions.polyfills);
       if (entryPoints['polyfills']) {
@@ -109,72 +123,33 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
         entryPoints['polyfills'] = [projectPolyfills];
       }
     }
-
-    if (!buildOptions.aot) {
-      const jitPolyfills = 'core-js/proposals/reflect-metadata';
-      if (entryPoints['polyfills']) {
-        entryPoints['polyfills'].push(jitPolyfills);
-      } else {
-        entryPoints['polyfills'] = [jitPolyfills];
-      }
-    }
   }
 
-  if (profilingEnabled) {
+  if (allowedCommonJsDependencies) {
+    // When this is not defined it means the builder doesn't support showing common js usages.
+    // When it does it will be an array.
     extraPlugins.push(
-      new debug.ProfilingPlugin({
-        outputPath: path.resolve(root, 'chrome-profiler-events.json'),
+      new CommonJsUsageWarnPlugin({
+        allowedDependencies: allowedCommonJsDependencies,
       }),
     );
   }
 
   // process global scripts
-  const globalScriptsByBundleName = normalizeExtraEntryPoints(
-    buildOptions.scripts,
-    'scripts',
-  ).reduce((prev: { bundleName: string; paths: string[]; inject: boolean }[], curr) => {
-    const { bundleName, inject, input } = curr;
-    let resolvedPath = path.resolve(root, input);
-
-    if (!existsSync(resolvedPath)) {
-      try {
-        resolvedPath = require.resolve(input, { paths: [root] });
-      } catch {
-        throw new Error(`Script file ${input} does not exist.`);
-      }
-    }
-
-    const existingEntry = prev.find((el) => el.bundleName === bundleName);
-    if (existingEntry) {
-      if (existingEntry.inject && !inject) {
-        // All entries have to be lazy for the bundle to be lazy.
-        throw new Error(`The ${bundleName} bundle is mixing injected and non-injected scripts.`);
-      }
-
-      existingEntry.paths.push(resolvedPath);
-    } else {
-      prev.push({
-        bundleName,
-        inject,
-        paths: [resolvedPath],
-      });
-    }
-
-    return prev;
-  }, []);
-
   // Add a new asset for each entry.
-  for (const script of globalScriptsByBundleName) {
+  for (const { bundleName, inject, paths } of globalScriptsByBundleName(
+    root,
+    buildOptions.scripts,
+  )) {
     // Lazy scripts don't get a hash, otherwise they can't be loaded by name.
-    const hash = script.inject ? hashFormat.script : '';
-    const bundleName = script.bundleName;
+    const hash = inject ? hashFormat.script : '';
 
     extraPlugins.push(
       new ScriptsWebpackPlugin({
         name: bundleName,
         sourceMap: scriptsSourceMap,
+        scripts: paths,
         filename: `${path.basename(bundleName)}${hash}.js`,
-        scripts: script.paths,
         basePath: projectRoot,
       }),
     );
@@ -182,56 +157,9 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
 
   // process asset entries
   if (buildOptions.assets.length) {
-    const copyWebpackPluginPatterns = buildOptions.assets.map(
-      (asset: AssetPatternClass, index: number): ObjectPattern => {
-        // Resolve input paths relative to workspace root and add slash at the end.
-        // eslint-disable-next-line prefer-const
-        let { input, output, ignore = [], glob } = asset;
-        input = path.resolve(root, input).replace(/\\/g, '/');
-        input = input.endsWith('/') ? input : input + '/';
-        output = output.endsWith('/') ? output : output + '/';
-
-        if (output.startsWith('..')) {
-          throw new Error('An asset cannot be written to a location outside of the output path.');
-        }
-
-        return {
-          context: input,
-          // Now we remove starting slash to make Webpack place it from the output root.
-          to: output.replace(/^\//, ''),
-          from: glob,
-          noErrorOnMissing: true,
-          force: true,
-          globOptions: {
-            dot: true,
-            followSymbolicLinks: !!asset.followSymlinks,
-            ignore: [
-              '.gitkeep',
-              '**/.DS_Store',
-              '**/Thumbs.db',
-              // Negate patterns needs to be absolute because copy-webpack-plugin uses absolute globs which
-              // causes negate patterns not to match.
-              // See: https://github.com/webpack-contrib/copy-webpack-plugin/issues/498#issuecomment-639327909
-              ...ignore,
-            ].map((i) => path.posix.join(input, i)),
-          },
-          priority: index,
-        };
-      },
-    );
-
     extraPlugins.push(
       new CopyWebpackPlugin({
-        patterns: copyWebpackPluginPatterns,
-      }),
-    );
-  }
-
-  if (buildOptions.showCircularDependencies) {
-    const CircularDependencyPlugin = require('circular-dependency-plugin');
-    extraPlugins.push(
-      new CircularDependencyPlugin({
-        exclude: /[\\\/]node_modules[\\\/]/,
+        patterns: assetPatterns(root, buildOptions.assets),
       }),
     );
   }
@@ -251,39 +179,48 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
     );
   }
 
+  if (scriptsSourceMap || stylesSourceMap) {
+    const include = [];
+    if (scriptsSourceMap) {
+      include.push(/js$/);
+    }
+
+    if (stylesSourceMap) {
+      include.push(/css$/);
+    }
+
+    extraPlugins.push(
+      new SourceMapDevToolPlugin({
+        filename: '[file].map',
+        include,
+        // We want to set sourceRoot to  `webpack:///` for non
+        // inline sourcemaps as otherwise paths to sourcemaps will be broken in browser
+        // `webpack:///` is needed for Visual Studio breakpoints to work properly as currently
+        // there is no way to set the 'webRoot'
+        sourceRoot: 'webpack:///',
+        moduleFilenameTemplate: '[resource-path]',
+        append: hiddenSourceMap ? false : undefined,
+      }),
+    );
+  }
+
   if (buildOptions.statsJson) {
     extraPlugins.push(
-      new (class {
-        apply(compiler: Compiler) {
-          compiler.hooks.done.tapPromise('angular-cli-stats', async (stats) => {
-            const { stringifyStream } = await import('@discoveryjs/json-ext');
-            const data = stats.toJson('verbose');
-            const statsOutputPath = path.resolve(root, buildOptions.outputPath, 'stats.json');
+      new JsonStatsPlugin(path.resolve(root, buildOptions.outputPath, 'stats.json')),
+    );
+  }
 
-            try {
-              await fsPromises.mkdir(path.dirname(statsOutputPath), { recursive: true });
-
-              await new Promise<void>((resolve, reject) =>
-                stringifyStream(data)
-                  .pipe(createWriteStream(statsOutputPath))
-                  .on('close', resolve)
-                  .on('error', reject),
-              );
-            } catch (error) {
-              addError(
-                stats.compilation,
-                `Unable to write stats file: ${error.message || 'unknown error'}`,
-              );
-            }
-          });
-        }
-      })(),
+  if (subresourceIntegrity) {
+    extraPlugins.push(
+      new SubresourceIntegrityPlugin({
+        hashFuncNames: ['sha384'],
+      }),
     );
   }
 
   if (scriptsSourceMap || stylesSourceMap) {
     extraRules.push({
-      test: /\.m?js$/,
+      test: /\.[cm]?jsx?$/,
       enforce: 'pre',
       loader: require.resolve('source-map-loader'),
       options: {
@@ -301,64 +238,61 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
     });
   }
 
-  let buildOptimizerUseRule: RuleSetRule[] = [];
-  if (buildOptions.buildOptimizer && wco.scriptTarget < ScriptTarget.ES2015) {
-    extraPlugins.push(new BuildOptimizerWebpackPlugin());
-    buildOptimizerUseRule = [
-      {
-        loader: buildOptimizerLoaderPath,
-        options: { sourceMap: scriptsSourceMap },
-      },
-    ];
+  if (main || polyfills) {
+    extraRules.push({
+      test: tsConfig.options.allowJs ? /\.[cm]?[tj]sx?$/ : /\.[cm]?tsx?$/,
+      loader: AngularWebpackLoaderPath,
+      // The below are known paths that are not part of the TypeScript compilation even when allowJs is enabled.
+      exclude: [
+        /[\\/]node_modules[/\\](?:css-loader|mini-css-extract-plugin|webpack-dev-server|webpack)[/\\]/,
+      ],
+    });
+    extraPlugins.push(createIvyPlugin(wco, aot, tsConfigPath));
+  }
+
+  if (webWorkerTsConfig) {
+    extraPlugins.push(createIvyPlugin(wco, false, path.resolve(wco.root, webWorkerTsConfig)));
   }
 
   const extraMinimizers = [];
-
   if (scriptsOptimization) {
-    const globalScriptsNames = globalScriptsByBundleName.map((s) => s.bundleName);
-
-    if (globalScriptsNames.length > 0) {
-      // Script bundles are fully optimized here in one step since they are never downleveled.
-      // They are shared between ES2015 & ES5 outputs so must support ES5.
-      // The `terser-webpack-plugin` will add the minified flag to the asset which will prevent
-      // additional optimizations by the next plugin.
-      const TerserPlugin = require('terser-webpack-plugin');
-      extraMinimizers.push(
-        new TerserPlugin({
-          parallel: maxWorkers,
-          extractComments: false,
-          include: globalScriptsNames,
-          terserOptions: {
-            ecma: 5,
-            compress: allowMinify,
-            output: {
-              ascii_only: true,
-              wrap_func_args: false,
-            },
-            mangle: allowMangle && platform !== 'server',
-          },
-        }),
-      );
-    }
-
     extraMinimizers.push(
       new JavaScriptOptimizerPlugin({
         define: buildOptions.aot ? GLOBAL_DEFS_FOR_TERSER_WITH_AOT : GLOBAL_DEFS_FOR_TERSER,
         sourcemap: scriptsSourceMap,
-        target: wco.scriptTarget,
-        keepNames: !allowMangle || platform === 'server',
+        target: scriptTarget,
+        keepIdentifierNames: !allowMangle || isPlatformServer,
+        keepNames: isPlatformServer,
         removeLicenses: buildOptions.extractLicenses,
         advanced: buildOptions.buildOptimizer,
       }),
     );
   }
 
+  if (platform === 'browser' && (scriptsOptimization || stylesOptimization.minify)) {
+    extraMinimizers.push(new TransferSizePlugin());
+  }
+
+  const externals: Configuration['externals'] = [...externalDependencies];
+  if (isPlatformServer && !bundleDependencies) {
+    externals.push(({ context, request }, callback) =>
+      externalizePackages(context ?? wco.projectRoot, request, callback),
+    );
+  }
+
+  let crossOriginLoading: NonNullable<Configuration['output']>['crossOriginLoading'] = false;
+  if (subresourceIntegrity && crossOrigin === 'none') {
+    crossOriginLoading = 'anonymous';
+  } else if (crossOrigin !== 'none') {
+    crossOriginLoading = crossOrigin;
+  }
+
   return {
     mode: scriptsOptimization || stylesOptimization.minify ? 'production' : 'development',
     devtool: false,
     target: [
-      platform === 'server' ? 'node' : 'web',
-      tsConfig.options.target === ScriptTarget.ES5 ? 'es5' : 'es2015',
+      isPlatformServer ? 'node' : 'web',
+      scriptTarget === ScriptTarget.ES5 ? 'es5' : 'es2015',
     ],
     profile: buildOptions.statsJson,
     resolve: {
@@ -366,134 +300,140 @@ export function getCommonConfig(wco: WebpackConfigOptions): Configuration {
       extensions: ['.ts', '.tsx', '.mjs', '.js'],
       symlinks: !buildOptions.preserveSymlinks,
       modules: [tsConfig.options.baseUrl || projectRoot, 'node_modules'],
+      ...getMainFieldsAndConditionNames(scriptTarget, isPlatformServer),
     },
     resolveLoader: {
       symlinks: !buildOptions.preserveSymlinks,
     },
     context: root,
     entry: entryPoints,
+    externals,
     output: {
+      uniqueName: projectName,
+      hashFunction: 'xxhash64', // todo: remove in webpack 6. This is part of `futureDefaults`.
       clean: buildOptions.deleteOutputPath ?? true,
       path: path.resolve(root, buildOptions.outputPath),
       publicPath: buildOptions.deployUrl ?? '',
       filename: `[name]${hashFormat.chunk}.js`,
       chunkFilename: `[name]${hashFormat.chunk}.js`,
+      libraryTarget: isPlatformServer ? 'commonjs' : undefined,
+      crossOriginLoading,
+      trustedTypes: 'angular#bundler',
+      scriptType: 'module',
     },
     watch: buildOptions.watch,
-    watchOptions: getWatchOptions(buildOptions.poll),
+    watchOptions: {
+      poll,
+      ignored: poll === undefined ? undefined : '**/node_modules/**',
+    },
     performance: {
       hints: false,
     },
     ignoreWarnings: [
-      // Webpack 5+ has no facility to disable this warning.
-      // System.import is used in @angular/core for deprecated string-form lazy routes
-      /System.import\(\) is deprecated and will be removed soon/i,
       // https://github.com/webpack-contrib/source-map-loader/blob/b2de4249c7431dd8432da607e08f0f65e9d64219/src/index.js#L83
       /Failed to parse source map from/,
       // https://github.com/webpack-contrib/postcss-loader/blob/bd261875fdf9c596af4ffb3a1a73fe3c549befda/src/index.js#L153-L158
       /Add postcss as project dependency/,
+      // esbuild will issue a warning, while still hoists the @charset at the very top.
+      // This is caused by a bug in css-loader https://github.com/webpack-contrib/css-loader/issues/1212
+      /"@charset" must be the first rule in the file/,
     ],
     module: {
       // Show an error for missing exports instead of a warning.
       strictExportPresence: true,
+      parser: {
+        javascript: {
+          // Disable auto URL asset module creation. This doesn't effect `new Worker(new URL(...))`
+          // https://webpack.js.org/guides/asset-modules/#url-assets
+          url: false,
+          worker: !!webWorkerTsConfig,
+        },
+      },
       rules: [
         {
-          // Mark files inside `@angular/core` as using SystemJS style dynamic imports.
-          // Removing this will cause deprecation warnings to appear.
-          test: /[\/\\]@angular[\/\\]core[\/\\].+\.js$/,
-          parser: { system: true },
+          test: /\.?(svg|html)$/,
+          // Only process HTML and SVG which are known Angular component resources.
+          resourceQuery: /\?ngResource/,
+          type: 'asset/source',
         },
         {
           // Mark files inside `rxjs/add` as containing side effects.
           // If this is fixed upstream and the fixed version becomes the minimum
           // supported version, this can be removed.
-          test: /[\/\\]rxjs[\/\\]add[\/\\].+\.js$/,
+          test: /[/\\]rxjs[/\\]add[/\\].+\.js$/,
           sideEffects: true,
         },
         {
-          test: /\.[cm]?js$|\.tsx?$/,
+          test: /\.[cm]?[tj]sx?$/,
           // The below is needed due to a bug in `@babel/runtime`. See: https://github.com/babel/babel/issues/12824
           resolve: { fullySpecified: false },
-          exclude: [/[\/\\](?:core-js|\@babel|tslib|web-animations-js)[\/\\]/],
+          exclude: [
+            /[\\/]node_modules[/\\](?:core-js|@babel|tslib|web-animations-js|web-streams-polyfill|whatwg-url)[/\\]/,
+          ],
           use: [
             {
               loader: require.resolve('../../babel/webpack-loader'),
               options: {
-                cacheDirectory: findCachePath('babel-webpack'),
-                scriptTarget: wco.scriptTarget,
+                cacheDirectory: (cache.enabled && path.join(cache.path, 'babel-webpack')) || false,
+                scriptTarget,
                 aot: buildOptions.aot,
-                optimize: buildOptions.buildOptimizer && wco.scriptTarget >= ScriptTarget.ES2015,
-              },
+                optimize: buildOptions.buildOptimizer,
+                instrumentCode: codeCoverage
+                  ? {
+                      includedBasePath: sourceRoot,
+                      excludedPaths: getInstrumentationExcludedPaths(root, codeCoverageExclude),
+                    }
+                  : undefined,
+              } as AngularBabelLoaderOptions,
             },
-            ...buildOptimizerUseRule,
           ],
         },
         ...extraRules,
       ],
     },
     experiments: {
+      backCompat: false,
       syncWebAssembly: true,
       asyncWebAssembly: true,
     },
-    cache: getCacheSettings(wco, buildBrowserFeatures.supportedBrowsers),
+    infrastructureLogging: {
+      debug: verbose,
+      level: verbose ? 'verbose' : 'error',
+    },
+    stats: getStatsOptions(verbose),
+    cache: getCacheSettings(wco, NG_VERSION.full),
     optimization: {
       minimizer: extraMinimizers,
       moduleIds: 'deterministic',
       chunkIds: buildOptions.namedChunks ? 'named' : 'deterministic',
       emitOnErrors: false,
+      runtimeChunk: isPlatformServer ? false : 'single',
+      splitChunks: {
+        maxAsyncRequests: Infinity,
+        cacheGroups: {
+          default: !!commonChunk && {
+            chunks: 'async',
+            minChunks: 2,
+            priority: 10,
+          },
+          common: !!commonChunk && {
+            name: 'common',
+            chunks: 'async',
+            minChunks: 2,
+            enforce: true,
+            priority: 5,
+          },
+          vendors: false,
+          defaultVendors: !!vendorChunk && {
+            name: 'vendor',
+            chunks: (chunk) => chunk.name === 'main',
+            enforce: true,
+            test: /[\\/]node_modules[\\/]/,
+          },
+        },
+      },
     },
-    plugins: [
-      // Always replace the context for the System.import in angular/core to prevent warnings.
-      // https://github.com/angular/angular/issues/11580
-      new ContextReplacementPlugin(
-        /\@angular(\\|\/)core(\\|\/)/,
-        path.join(projectRoot, '$_lazy_route_resources'),
-        {},
-      ),
-      new DedupeModuleResolvePlugin({ verbose: buildOptions.verbose }),
-      ...extraPlugins,
-    ],
+    plugins: [new NamedChunksPlugin(), new DedupeModuleResolvePlugin({ verbose }), ...extraPlugins],
+    node: false,
   };
-}
-
-function getCacheSettings(
-  wco: WebpackConfigOptions,
-  supportedBrowsers: string[],
-): WebpackOptionsNormalized['cache'] {
-  if (persistentBuildCacheEnabled) {
-    const packageVersion = require('../../../package.json').version;
-
-    return {
-      type: 'filesystem',
-      cacheDirectory: findCachePath('angular-webpack'),
-      maxMemoryGenerations: 1,
-      // We use the versions and build options as the cache name. The Webpack configurations are too
-      // dynamic and shared among different build types: test, build and serve.
-      // None of which are "named".
-      name: createHash('sha1')
-        .update(NG_VERSION.full)
-        .update(packageVersion)
-        .update(wco.projectRoot)
-        .update(JSON.stringify(wco.tsConfig))
-        .update(
-          JSON.stringify({
-            ...wco.buildOptions,
-            // Needed because outputPath changes on every build when using i18n extraction
-            // https://github.com/angular/angular-cli/blob/736a5f89deaca85f487b78aec9ff66d4118ceb6a/packages/angular_devkit/build_angular/src/utils/i18n-options.ts#L264-L265
-            outputPath: undefined,
-          }),
-        )
-        .update(supportedBrowsers.join(''))
-        .digest('hex'),
-    };
-  }
-
-  if (wco.buildOptions.watch && !cachingDisabled) {
-    return {
-      type: 'memory',
-      maxGenerations: 1,
-    };
-  }
-
-  return false;
 }

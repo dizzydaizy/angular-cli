@@ -12,3 +12,5 @@
 .yarn/
 dist/
 third_party/
+/tests/legacy-cli/e2e/assets/
+/tools/test/*.json

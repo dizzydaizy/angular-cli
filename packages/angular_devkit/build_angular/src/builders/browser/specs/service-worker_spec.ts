@@ -27,7 +27,7 @@ describe('Browser Builder service worker', () => {
         installMode: 'lazy',
         updateMode: 'prefetch',
         resources: {
-          files: ['/assets/**', '/*.(eot|svg|cur|jpg|png|webp|gif|otf|ttf|woff|woff2|ani)'],
+          files: ['/assets/**', '/*.(svg|cur|jpg|jpeg|png|apng|webp|avif|gif|otf|ttf|woff|woff2)'],
         },
       },
     ],
@@ -50,6 +50,24 @@ describe('Browser Builder service worker', () => {
     await expectAsync(run.result).toBeResolvedTo(jasmine.objectContaining({ success: false }));
 
     await run.stop();
+  });
+
+  it('supports specifying a custom service worker configuration file', async () => {
+    host.writeMultipleFiles({
+      'src/configs/ngsw.json': JSON.stringify(manifest),
+      'src/assets/folder-asset.txt': 'folder-asset.txt',
+      'src/styles.css': `body { background: url(./spectrum.png); }`,
+    });
+
+    const overrides = { serviceWorker: true, ngswConfigPath: 'src/configs/ngsw.json' };
+
+    const run = await architect.scheduleTarget(target, overrides);
+
+    await expectAsync(run.result).toBeResolvedTo(jasmine.objectContaining({ success: true }));
+
+    await run.stop();
+
+    expect(host.scopedSync().exists(normalize('dist/ngsw.json'))).toBeTrue();
   });
 
   it('works with service worker', async () => {

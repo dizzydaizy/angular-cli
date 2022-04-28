@@ -24,7 +24,7 @@ const gitIgnore = gitIgnoreFiles
   .filter((line) => !line.match(/^\s*$/));
 const gitIgnoreExcept = gitIgnoreFiles
   .filter((line) => line.startsWith('!'))
-  .map((line) => line.substr(1));
+  .map((line) => line.slice(1));
 
 function _gitIgnoreMatch(p: string): boolean {
   p = path.relative(path.dirname(__dirname), p);
@@ -121,10 +121,14 @@ function _rm(p: string) {
   fs.unlinkSync(p);
 }
 
+function rimraf(location: string) {
+  fs.rmSync(location, { force: true, recursive: true, maxRetries: 3 });
+}
+
 function _clean(logger: logging.Logger) {
   logger.info('Cleaning...');
   logger.info('  Removing dist/...');
-  fs.rmdirSync(path.join(__dirname, '../dist'), { recursive: true, maxRetries: 3 });
+  rimraf(path.join(__dirname, '../dist'));
 }
 
 function _sortPackages() {
@@ -192,19 +196,19 @@ export default async function (
     packageLogger.info(packageName);
     const pkg = packages[packageName];
     _recursiveCopy(pkg.build, pkg.dist, logger);
-    fs.rmdirSync(pkg.build, { recursive: true, maxRetries: 3 });
+    rimraf(pkg.build);
   }
 
   logger.info('Merging bazel-bin/ with dist/');
   for (const packageName of sortedPackages) {
     const pkg = packages[packageName];
-    const bazelBinPath = pkg.build.replace(/([\\\/]dist[\\\/])(packages)/, (_, dist, packages) => {
+    const bazelBinPath = pkg.build.replace(/([\\/]dist[\\/])(packages)/, (_, dist, packages) => {
       return path.join(dist, 'dist-schema', packages);
     });
     if (fs.existsSync(bazelBinPath)) {
       packageLogger.info(packageName);
       _recursiveCopy(bazelBinPath, pkg.dist, logger);
-      fs.rmdirSync(bazelBinPath, { recursive: true, maxRetries: 3 });
+      rimraf(bazelBinPath);
     }
   }
 
@@ -223,7 +227,7 @@ export default async function (
     const subSubLogger = resourceLogger.createChild(packageName);
     subSubLogger.info(`${files.length} files total...`);
     const resources = files.filter((fileName) => {
-      if (/(?:^|[\/\\])node_modules[\/\\]/.test(fileName)) {
+      if (/(?:^|[/\\])node_modules[/\\]/.test(fileName)) {
         return false;
       }
 
@@ -390,8 +394,13 @@ export default async function (
             } else {
               obj[depName] = `github:${pkg.snapshotRepo}#${pkg.snapshotHash}`;
             }
-          } else if ((obj[depName] as string).match(/\b0\.0\.0\b/)) {
-            obj[depName] = (obj[depName] as string).replace(/\b0\.0\.0\b/, v);
+          } else if ((obj[depName] as string).match(/\b0\.0\.0-PLACEHOLDER\b/)) {
+            obj[depName] = (obj[depName] as string).replace(/\b0\.0\.0-PLACEHOLDER\b/, v);
+          } else if ((obj[depName] as string).match(/\b0\.0\.0-EXPERIMENTAL-PLACEHOLDER\b/)) {
+            obj[depName] = (obj[depName] as string).replace(
+              /\b0\.0\.0-EXPERIMENTAL-PLACEHOLDER\b/,
+              v,
+            );
           }
         }
       }

@@ -317,7 +317,7 @@ describe('Browser Builder styles', () => {
 
     const overrides = { optimization: true };
     const { files } = await browserBuild(architect, host, target, overrides);
-    expect(await files['styles.css']).toContain('/*! important-comment */div{flex:1}');
+    expect(await files['styles.css']).toContain('/*! important-comment */');
   });
 
   it('supports autoprefixer grid comments in SCSS with optimization true', async () => {
@@ -513,6 +513,8 @@ describe('Browser Builder styles', () => {
 
     const run2 = await architect.scheduleTarget(target, overrides);
     await expectAsync(run2.result).toBeResolvedTo(jasmine.objectContaining({ success: false }));
+    await run2.stop();
+    await run.stop();
   });
 
   it('supports Protocol-relative Url', async () => {
@@ -625,5 +627,56 @@ describe('Browser Builder styles', () => {
       };
       await browserBuild(architect, host, target, overrides);
     });
+  });
+
+  it('should minify colors based on browser support', async () => {
+    host.writeMultipleFiles({
+      'src/styles.css': `
+        div { box-shadow: 0 3px 10px, rgba(0, 0, 0, 0.15); }
+      `,
+    });
+
+    let result = await browserBuild(architect, host, target, { optimization: true });
+    expect(await result.files['styles.css']).toContain('#00000026');
+
+    await host.restore().toPromise();
+    await host.initialize().toPromise();
+    architect = (await createArchitect(host.root())).architect;
+
+    // Edge 17 doesn't support #rrggbbaa colors
+    // https://github.com/angular/angular-cli/issues/21594#:~:text=%23rrggbbaa%20hex%20color%20notation
+    // While this browser is un-supported, this is used as a base case to test that the underlying
+    // logic to pass the list of supported browsers to the css optimizer works.
+    host.writeMultipleFiles({
+      'src/styles.css': `
+        div { box-shadow: 0 3px 10px, rgba(0, 0, 0, 0.15); }
+      `,
+      '.browserslistrc': 'edge 17',
+    });
+
+    result = await browserBuild(architect, host, target, { optimization: true });
+    expect(await result.files['styles.css']).toContain('rgba(0,0,0,.15)');
+  });
+
+  it('works when using the same css file in `styles` and `stylesUrl`', async () => {
+    host.writeMultipleFiles({
+      'src/styles.css': `
+        div { color: red }
+      `,
+      './src/app/app.component.ts': `
+        import { Component } from '@angular/core';
+
+        @Component({
+          selector: 'app-root',
+          templateUrl: './app.component.html',
+          styleUrls: ['../styles.css']
+        })
+        export class AppComponent {
+          title = 'app';
+        }
+      `,
+    });
+
+    await browserBuild(architect, host, target, { styles: ['src/styles.css'] });
   });
 });

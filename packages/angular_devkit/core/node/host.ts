@@ -6,7 +6,8 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import {
+import type { FSWatcher as ChokidarWatcher } from 'chokidar';
+import fs, {
   PathLike,
   Stats,
   constants,
@@ -16,36 +17,13 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
-  rmdirSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from 'fs';
-import { dirname as pathDirname, join as pathJoin } from 'path';
-import { Observable, concat, from as observableFrom, of, throwError } from 'rxjs';
-import { concatMap, map, mergeMap, publish, refCount } from 'rxjs/operators';
-import {
-  Path,
-  PathFragment,
-  dirname,
-  fragment,
-  getSystemPath,
-  join,
-  normalize,
-  virtualFs,
-} from '../src';
-
-interface ChokidarWatcher {
-  // eslint-disable-next-line @typescript-eslint/no-misused-new
-  new (options: {}): ChokidarWatcher;
-
-  add(path: string): ChokidarWatcher;
-  on(type: 'change', cb: (path: string) => void): ChokidarWatcher;
-  on(type: 'add', cb: (path: string) => void): ChokidarWatcher;
-  on(type: 'unlink', cb: (path: string) => void): ChokidarWatcher;
-
-  close(): void;
-}
+import { dirname as pathDirname } from 'path';
+import { Observable, from as observableFrom } from 'rxjs';
+import { map, mergeMap, publish, refCount } from 'rxjs/operators';
+import { Path, PathFragment, dirname, fragment, getSystemPath, normalize, virtualFs } from '../src';
 
 async function exists(path: PathLike): Promise<boolean> {
   try {
@@ -60,7 +38,7 @@ async function exists(path: PathLike): Promise<boolean> {
 // This will only be initialized if the watch() method is called.
 // Otherwise chokidar appears only in type positions, and shouldn't be referenced
 // in the JavaScript output.
-let FSWatcher: ChokidarWatcher;
+let FSWatcher: typeof ChokidarWatcher;
 function loadFSWatcher() {
   if (!FSWatcher) {
     try {
@@ -100,28 +78,8 @@ export class NodeJsAsyncHost implements virtualFs.Host<Stats> {
   }
 
   delete(path: Path): Observable<void> {
-    return this.isDirectory(path).pipe(
-      mergeMap(async (isDirectory) => {
-        if (isDirectory) {
-          const recursiveDelete = async (dirPath: string) => {
-            for (const fragment of await fsPromises.readdir(dirPath)) {
-              const sysPath = pathJoin(dirPath, fragment);
-              const stats = await fsPromises.stat(sysPath);
-
-              if (stats.isDirectory()) {
-                await recursiveDelete(sysPath);
-                await fsPromises.rmdir(sysPath);
-              } else {
-                await fsPromises.unlink(sysPath);
-              }
-            }
-          };
-
-          await recursiveDelete(getSystemPath(path));
-        } else {
-          await fsPromises.unlink(getSystemPath(path));
-        }
-      }),
+    return observableFrom(
+      fsPromises.rm(getSystemPath(path), { force: true, recursive: true, maxRetries: 3 }),
     );
   }
 
@@ -159,7 +117,8 @@ export class NodeJsAsyncHost implements virtualFs.Host<Stats> {
   ): Observable<virtualFs.HostWatchEvent> | null {
     return new Observable<virtualFs.HostWatchEvent>((obs) => {
       loadFSWatcher();
-      const watcher = new FSWatcher({ persistent: true }).add(getSystemPath(path));
+      const watcher = new FSWatcher({ persistent: true });
+      watcher.add(getSystemPath(path));
 
       watcher
         .on('change', (path) => {
@@ -216,27 +175,11 @@ export class NodeJsSyncHost implements virtualFs.Host<Stats> {
   }
 
   delete(path: Path): Observable<void> {
-    return this.isDirectory(path).pipe(
-      concatMap((isDir) => {
-        if (isDir) {
-          const dirPaths = readdirSync(getSystemPath(path));
-          const rmDirComplete = new Observable<void>((obs) => {
-            rmdirSync(getSystemPath(path));
-            obs.complete();
-          });
+    return new Observable<void>((obs) => {
+      fs.rmSync(getSystemPath(path), { force: true, recursive: true, maxRetries: 3 });
 
-          return concat(...dirPaths.map((name) => this.delete(join(path, name))), rmDirComplete);
-        } else {
-          try {
-            unlinkSync(getSystemPath(path));
-          } catch (err) {
-            return throwError(err);
-          }
-
-          return of(undefined);
-        }
-      }),
-    );
+      obs.complete();
+    });
   }
 
   rename(from: Path, to: Path): Observable<void> {
@@ -288,9 +231,9 @@ export class NodeJsSyncHost implements virtualFs.Host<Stats> {
     _options?: virtualFs.HostWatchOptions,
   ): Observable<virtualFs.HostWatchEvent> | null {
     return new Observable<virtualFs.HostWatchEvent>((obs) => {
-      const opts = { persistent: false };
       loadFSWatcher();
-      const watcher = new FSWatcher(opts).add(getSystemPath(path));
+      const watcher = new FSWatcher({ persistent: false });
+      watcher.add(getSystemPath(path));
 
       watcher
         .on('change', (path) => {

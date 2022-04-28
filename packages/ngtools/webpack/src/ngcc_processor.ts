@@ -6,7 +6,7 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import { LogLevel, Logger, process as mainNgcc } from '@angular/compiler-cli/ngcc';
+import type { LogLevel, Logger } from '@angular/compiler-cli/ngcc';
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
@@ -35,6 +35,7 @@ export class NgccProcessor {
   private _nodeModulesDirectory: string;
 
   constructor(
+    private readonly compilerNgcc: typeof import('@angular/compiler-cli/ngcc'),
     private readonly propertiesToConsider: string[],
     private readonly compilationWarnings: (Error | string)[],
     private readonly compilationErrors: (Error | string)[],
@@ -43,7 +44,11 @@ export class NgccProcessor {
     private readonly inputFileSystem: InputFileSystem,
     private readonly resolver: ResolverWithOptions,
   ) {
-    this._logger = new NgccLogger(this.compilationWarnings, this.compilationErrors);
+    this._logger = new NgccLogger(
+      this.compilationWarnings,
+      this.compilationErrors,
+      compilerNgcc.LogLevel.info,
+    );
     this._nodeModulesDirectory = this.findNodeModulesDirectory(this.basePath);
   }
 
@@ -68,15 +73,6 @@ export class NgccProcessor {
     const runHashBasePath = path.join(this._nodeModulesDirectory, '.cli-ngcc');
     const projectBasePath = path.join(this._nodeModulesDirectory, '..');
     try {
-      let lockData;
-      let lockFile = 'yarn.lock';
-      try {
-        lockData = readFileSync(path.join(projectBasePath, lockFile));
-      } catch {
-        lockFile = 'package-lock.json';
-        lockData = readFileSync(path.join(projectBasePath, lockFile));
-      }
-
       let ngccConfigData;
       try {
         ngccConfigData = readFileSync(path.join(projectBasePath, 'ngcc.config.js'));
@@ -86,11 +82,12 @@ export class NgccProcessor {
 
       const relativeTsconfigPath = path.relative(projectBasePath, this.tsConfigPath);
       const tsconfigData = readFileSync(this.tsConfigPath);
+      const { lockFileData, lockFilePath } = this.findPackageManagerLockFile(projectBasePath);
 
       // Generate a hash that represents the state of the package lock file and used tsconfig
       const runHash = createHash('sha256')
-        .update(lockData)
-        .update(lockFile)
+        .update(lockFileData)
+        .update(lockFilePath)
         .update(ngccConfigData)
         .update(tsconfigData)
         .update(relativeTsconfigPath)
@@ -123,7 +120,7 @@ export class NgccProcessor {
     const { status, error } = spawnSync(
       process.execPath,
       [
-        require.resolve('@angular/compiler-cli/ngcc/main-ngcc.js'),
+        this.compilerNgcc.ngccMainFilePath,
         '--source' /** basePath */,
         this._nodeModulesDirectory,
         '--properties' /** propertiesToConsider */,
@@ -187,7 +184,7 @@ export class NgccProcessor {
 
     const timeLabel = `NgccProcessor.processModule.ngcc.process+${moduleName}`;
     time(timeLabel);
-    mainNgcc({
+    this.compilerNgcc.process({
       basePath: this._nodeModulesDirectory,
       targetEntryPointPath: path.dirname(packageJsonPath),
       propertiesToConsider: this.propertiesToConsider,
@@ -243,14 +240,31 @@ export class NgccProcessor {
 
     throw new Error(`Cannot locate the 'node_modules' directory.`);
   }
+
+  private findPackageManagerLockFile(projectBasePath: string): {
+    lockFilePath: string;
+    lockFileData: Buffer;
+  } {
+    for (const lockFile of ['yarn.lock', 'pnpm-lock.yaml', 'package-lock.json']) {
+      const lockFilePath = path.join(projectBasePath, lockFile);
+
+      try {
+        return {
+          lockFilePath,
+          lockFileData: readFileSync(lockFilePath),
+        };
+      } catch {}
+    }
+
+    throw new Error('Cannot locate a package manager lock file.');
+  }
 }
 
 class NgccLogger implements Logger {
-  level = LogLevel.info;
-
   constructor(
     private readonly compilationWarnings: (Error | string)[],
     private readonly compilationErrors: (Error | string)[],
+    public level: LogLevel,
   ) {}
 
   // eslint-disable-next-line @typescript-eslint/no-empty-function

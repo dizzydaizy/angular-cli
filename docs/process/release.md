@@ -26,7 +26,7 @@ for the release. Primary-secondary pairs are as follows:
 ## Merging PRs
 
 The list of PRs which are currently ready to merge (approved with passing status checks) can
-be found with [this search](https://github.com/angular/angular-cli/pulls?q=is%3Apr+is%3Aopen+label%3A%22PR+action%3A+merge%22+-is%3Adraft).
+be found with [this search](https://github.com/angular/angular-cli/pulls?q=is%3Apr+is%3Aopen+label%3A%22action%3A+merge%22+-is%3Adraft).
 This list should be checked daily and any ready PRs should be merged. For each PR, check the
 `target` label to understand where it should be merged to. You can find which branches a specific
 PR will be merged into with the `yarn ng-dev pr check-target-branches <pr>` command.
@@ -55,7 +55,38 @@ In general, cherry picks for LTS should only be done if it meets one of the crit
 
 Releasing is performed using Angular's unified release tooling. Each week, two releases are expected, `latest` and `next` on npm.
 
-To perform a release run the following and navigate the prompts:
+**For a minor OR major release:**
+
+After FW releases `-rc.0` for an upcoming minor/major version, update the corresponding version in
+[`latest-versions.ts`](/packages/schematics/angular/utility/latest-versions.ts#L=18) **and** peer
+dependencies on FW ([here](/packages/angular_devkit/build_angular/package.json) and
+[here](/packages/ngtools/webpack/package.json)) to match. This ensures that CLI `-rc.0` depends on
+FW `-rc.0`.
+
+The same needs to be done for a `-next.0` release, and needs to be done for both minor _and_ major
+releases.
+
+Once FW releases the actual minor/major release (for example: `13.0.0` or `13.1.0`), these versions
+should be updated to match (remove `-rc.0` and `-next.0`). This can be done as part of the release
+PR ([example](https://github.com/angular/angular-cli/pull/22580/files#diff-53a0da39e6b029472ba808fdd567f8706e752434fa51be6009f0140532b9fe2f))
+or a separate PR after FW releases but before CLI releases.
+
+**For a major release:**
+
+When a release is transitioning from a prerelease to a stable release, the semver ranges for Angular dependencies within the packages' `package.json` files will need to be updated to remove the prerelease version segment.
+For example, `"@angular/compiler-cli": "^13.0.0 || ^13.0.0-next"` in a prerelease should become `"@angular/compiler-cli": "^13.0.0"` in the stable release.
+The current packages that require adjustment are:
+
+- `@angular-devkit/build-angular`: [packages/angular_devkit/build_angular/package.json](/packages/angular_devkit/build_angular/package.json)
+- `@ngtools/webpack`: [packages/ngtools/webpack/package.json](/packages/ngtools/webpack/package.json)
+
+## Releasing the CLI
+
+Typical patch and next releases do not require FW to release in advance, as CLI does not pin the FW
+dependency.
+
+After confirming that the above steps have been done or are not necessary, run the following and
+navigate the prompts:
 
 ```sh
 yarn ng-dev release publish

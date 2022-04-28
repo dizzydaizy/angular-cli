@@ -6,16 +6,14 @@
 
 /// <reference types="node" />
 
-import { analytics } from '@angular-devkit/core';
 import { BaseException } from '@angular-devkit/core';
-import { InvalidJsonCharacterException } from '@angular-devkit/core';
 import { JsonObject } from '@angular-devkit/core';
+import { JsonValue } from '@angular-devkit/core';
 import { logging } from '@angular-devkit/core';
 import { Observable } from 'rxjs';
 import { Path } from '@angular-devkit/core';
 import { PathFragment } from '@angular-devkit/core';
 import { schema } from '@angular-devkit/core';
-import { UnexpectedEndOfInputException } from '@angular-devkit/core';
 import { Url } from 'url';
 import { virtualFs } from '@angular-devkit/core';
 import { workflow } from '@angular-devkit/schematics';
@@ -62,6 +60,8 @@ export type FileSystemCollectionDesc = CollectionDescription<FileSystemCollectio
 
 // @public (undocumented)
 export interface FileSystemCollectionDescription {
+    // (undocumented)
+    readonly encapsulation?: boolean;
     // (undocumented)
     readonly name: string;
     // (undocumented)
@@ -114,17 +114,17 @@ export abstract class FileSystemEngineHostBase implements FileSystemEngineHost_2
     // (undocumented)
     hasTaskExecutor(name: string): boolean;
     // (undocumented)
-    listSchematicNames(collection: FileSystemCollectionDesc): string[];
+    listSchematicNames(collection: FileSystemCollectionDesc, includeHidden?: boolean): string[];
     // (undocumented)
     registerContextTransform(t: ContextTransform): void;
     // (undocumented)
-    registerOptionsTransform<T extends object, R extends object>(t: OptionTransform<T, R>): void;
+    registerOptionsTransform<T extends object | null, R extends object>(t: OptionTransform<T, R>): void;
     // (undocumented)
     registerTaskExecutor<T>(factory: TaskExecutorFactory<T>, options?: T): void;
     // (undocumented)
     protected abstract _resolveCollectionPath(name: string, requester?: string): string;
     // (undocumented)
-    protected abstract _resolveReferenceString(name: string, parentPath: string): {
+    protected abstract _resolveReferenceString(name: string, parentPath: string, collectionDescription: FileSystemCollectionDesc): {
         ref: RuleFactory<{}>;
         path: string;
     } | null;
@@ -177,7 +177,7 @@ export interface FileSystemSchematicJsonDescription {
 
 // @public (undocumented)
 export class InvalidCollectionJsonException extends BaseException {
-    constructor(_name: string, path: string, jsonException?: UnexpectedEndOfInputException | InvalidJsonCharacterException);
+    constructor(_name: string, path: string, jsonException?: Error);
 }
 
 // @public
@@ -186,7 +186,7 @@ export class NodeModulesEngineHost extends FileSystemEngineHostBase {
     // (undocumented)
     protected _resolveCollectionPath(name: string, requester?: string): string;
     // (undocumented)
-    protected _resolveReferenceString(refString: string, parentPath: string): {
+    protected _resolveReferenceString(refString: string, parentPath: string, collectionDescription?: FileSystemCollectionDesc): {
         ref: RuleFactory<{}>;
         path: string;
     } | null;
@@ -236,7 +236,7 @@ export interface NodeWorkflowOptions {
     // (undocumented)
     force?: boolean;
     // (undocumented)
-    optionTransforms?: OptionTransform<object, object>[];
+    optionTransforms?: OptionTransform<Record<string, unknown> | null, object>[];
     // (undocumented)
     packageManager?: string;
     // (undocumented)
@@ -252,7 +252,7 @@ export interface NodeWorkflowOptions {
 }
 
 // @public (undocumented)
-export type OptionTransform<T extends object, R extends object> = (schematic: FileSystemSchematicDescription, options: T, context?: FileSystemSchematicContext) => Observable<R> | PromiseLike<R> | R;
+export type OptionTransform<T extends object | null, R extends object> = (schematic: FileSystemSchematicDescription, options: T, context?: FileSystemSchematicContext) => Observable<R> | PromiseLike<R> | R;
 
 // @public (undocumented)
 export class SchematicMissingDescriptionException extends BaseException {
@@ -275,7 +275,7 @@ export class SchematicNameCollisionException extends BaseException {
 }
 
 // @public (undocumented)
-export function validateOptionsWithSchema(registry: schema.SchemaRegistry): <T extends {}>(schematic: FileSystemSchematicDescription, options: T, context?: FileSystemSchematicContext | undefined) => Observable<T>;
+export function validateOptionsWithSchema(registry: schema.SchemaRegistry): <T extends {} | null>(schematic: FileSystemSchematicDescription, options: T, context?: FileSystemSchematicContext | undefined) => Observable<T>;
 
 // (No @packageDocumentation comment for this package)
 

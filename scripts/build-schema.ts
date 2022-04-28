@@ -19,7 +19,7 @@ export default async function (argv: {}, logger: logging.Logger) {
 
   const quicktypeRunner = require('../tools/quicktype_runner');
   logger.info('Removing dist-schema/...');
-  fs.rmdirSync(dist, { recursive: true, maxRetries: 3 });
+  fs.rmSync(dist, { force: true, recursive: true, maxRetries: 3 });
 
   logger.info('Generating JSON Schema....');
 

@@ -13,9 +13,9 @@ import * as https from 'https';
 import { Observable, from, isObservable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import * as Url from 'url';
-import { BaseException } from '../../exception/exception';
+import { BaseException } from '../../exception';
 import { PartiallyOrderedSet, deepCopy } from '../../utils';
-import { JsonArray, JsonObject, JsonValue, isJsonObject } from '../interface';
+import { JsonArray, JsonObject, JsonValue, isJsonObject } from '../utils';
 import {
   JsonPointer,
   JsonVisitor,
@@ -209,9 +209,6 @@ export class CoreSchemaRegistry implements SchemaRegistry {
       }
     }
 
-    if (fullReference.startsWith('#')) {
-      fullReference = fullReference.slice(0, -1);
-    }
     const resolvedSchema = this._ajv.getSchema(fullReference);
 
     return {
@@ -235,7 +232,6 @@ export class CoreSchemaRegistry implements SchemaRegistry {
   }
 
   private async _flatten(schema: JsonObject): Promise<JsonObject> {
-    this._replaceDeprecatedSchemaIdKeyword(schema);
     this._ajv.removeSchema(schema);
 
     this._currentCompilationSchemaInfo = undefined;
@@ -293,8 +289,6 @@ export class CoreSchemaRegistry implements SchemaRegistry {
     if (typeof schema === 'boolean') {
       return async (data) => ({ success: schema, data });
     }
-
-    this._replaceDeprecatedSchemaIdKeyword(schema);
 
     const schemaInfo: SchemaInfo = {
       smartDefaultRecord: new Map<string, JsonObject>(),
@@ -680,25 +674,9 @@ export class CoreSchemaRegistry implements SchemaRegistry {
     });
   }
 
-  /**
-   * Workaround to avoid a breaking change in downstream schematics.
-   * @deprecated will be removed in version 13.
-   */
-  private _replaceDeprecatedSchemaIdKeyword(schema: JsonObject): void {
-    if (typeof schema.id === 'string') {
-      schema.$id = schema.id;
-      delete schema.id;
-
-      // eslint-disable-next-line no-console
-      console.warn(
-        `"${schema.$id}" schema is using the keyword "id" which its support is deprecated. Use "$id" for schema ID.`,
-      );
-    }
-  }
-
   private normalizeDataPathArr(it: SchemaObjCxt): (number | string)[] {
     return it.dataPathArr
       .slice(1, it.dataLevel + 1)
-      .map((p) => (typeof p === 'number' ? p : p.str.replace(/\"/g, '')));
+      .map((p) => (typeof p === 'number' ? p : p.str.replace(/"/g, '')));
   }
 }

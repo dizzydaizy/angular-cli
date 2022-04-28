@@ -10,26 +10,22 @@ import { BuilderContext, createBuilder, targetFromTargetString } from '@angular-
 import { BuildResult, runWebpack } from '@angular-devkit/build-webpack';
 import { JsonObject } from '@angular-devkit/core';
 import type { ɵParsedMessage as LocalizeMessage } from '@angular/localize';
-import type { Diagnostics } from '@angular/localize/src/tools/src/diagnostics';
+import type { Diagnostics } from '@angular/localize/tools';
 import * as fs from 'fs';
 import * as path from 'path';
-import webpack from 'webpack';
+import webpack, { Configuration } from 'webpack';
 import { ExecutionTransformer } from '../../transforms';
 import { createI18nOptions } from '../../utils/i18n-options';
+import { loadEsmModule } from '../../utils/load-esm';
+import { purgeStaleBuildCache } from '../../utils/purge-cache';
 import { assertCompatibleAngularVersion } from '../../utils/version';
 import { generateBrowserWebpackConfigFromContext } from '../../utils/webpack-browser-config';
-import {
-  getBrowserConfig,
-  getCommonConfig,
-  getStatsConfig,
-  getTypeScriptConfig,
-  getWorkerConfig,
-} from '../../webpack/configs';
+import { getCommonConfig } from '../../webpack/configs';
 import { createWebpackLoggingCallback } from '../../webpack/utils/stats';
 import { Schema as BrowserBuilderOptions, OutputHashing } from '../browser/schema';
 import { Format, Schema } from './schema';
 
-export type ExtractI18nBuilderOptions = Schema & JsonObject;
+export type ExtractI18nBuilderOptions = Schema;
 
 function getI18nOutfile(format: string | undefined) {
   switch (format) {
@@ -52,54 +48,40 @@ function getI18nOutfile(format: string | undefined) {
 }
 
 async function getSerializer(
+  localizeToolsModule: typeof import('@angular/localize/tools'),
   format: Format,
   sourceLocale: string,
   basePath: string,
   useLegacyIds: boolean,
   diagnostics: Diagnostics,
 ) {
+  const {
+    XmbTranslationSerializer,
+    LegacyMessageIdMigrationSerializer,
+    ArbTranslationSerializer,
+    Xliff1TranslationSerializer,
+    Xliff2TranslationSerializer,
+    SimpleJsonTranslationSerializer,
+  } = localizeToolsModule;
+
   switch (format) {
     case Format.Xmb:
-      const { XmbTranslationSerializer } = await import(
-        '@angular/localize/src/tools/src/extract/translation_files/xmb_translation_serializer'
-      );
-
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return new XmbTranslationSerializer(basePath as any, useLegacyIds);
     case Format.Xlf:
     case Format.Xlif:
     case Format.Xliff:
-      const { Xliff1TranslationSerializer } = await import(
-        '@angular/localize/src/tools/src/extract/translation_files/xliff1_translation_serializer'
-      );
-
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return new Xliff1TranslationSerializer(sourceLocale, basePath as any, useLegacyIds, {});
     case Format.Xlf2:
     case Format.Xliff2:
-      const { Xliff2TranslationSerializer } = await import(
-        '@angular/localize/src/tools/src/extract/translation_files/xliff2_translation_serializer'
-      );
-
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       return new Xliff2TranslationSerializer(sourceLocale, basePath as any, useLegacyIds, {});
     case Format.Json:
-      const { SimpleJsonTranslationSerializer } = await import(
-        '@angular/localize/src/tools/src/extract/translation_files/json_translation_serializer'
-      );
-
       return new SimpleJsonTranslationSerializer(sourceLocale);
     case Format.LegacyMigrate:
-      const { LegacyMessageIdMigrationSerializer } = await import(
-        '@angular/localize/src/tools/src/extract/translation_files/legacy_message_id_migration_serializer'
-      );
-
       return new LegacyMessageIdMigrationSerializer(diagnostics);
     case Format.Arb:
-      const { ArbTranslationSerializer } = await import(
-        '@angular/localize/src/tools/src/extract/translation_files/arb_translation_serializer'
-      );
-
       const fileSystem = {
         relative(from: string, to: string): string {
           return path.relative(from, to);
@@ -149,6 +131,9 @@ export async function execute(
   // Check Angular version.
   assertCompatibleAngularVersion(context.workspaceRoot);
 
+  // Purge old build disk cache.
+  await purgeStaleBuildCache(context);
+
   const browserTarget = targetFromTargetString(options.browserTarget);
   const browserOptions = await context.validateOptions<JsonObject & BrowserBuilderOptions>(
     await context.getTargetOptions(browserTarget),
@@ -167,6 +152,16 @@ export async function execute(
 
   if (!context.target || !context.target.project) {
     throw new Error('The builder requires a target.');
+  }
+
+  try {
+    require.resolve('@angular/localize');
+  } catch {
+    return {
+      success: false,
+      error: `i18n extraction requires the '@angular/localize' package.`,
+      outputPath: outFile,
+    };
   }
 
   const metadata = await context.getProjectMetadata(context.target);
@@ -195,27 +190,18 @@ export async function execute(
     subresourceIntegrity: false,
     outputHashing: OutputHashing.None,
     namedChunks: true,
+    allowedCommonJsDependencies: undefined,
   };
   const { config, projectRoot } = await generateBrowserWebpackConfigFromContext(
     builderOptions,
     context,
     (wco) => {
-      if (wco.tsConfig.options.enableIvy === false) {
-        context.logger.warn(
-          'Ivy extraction enabled but application is not Ivy enabled. Extraction may fail.',
-        );
-      }
-
       // Default value for legacy message ids is currently true
       useLegacyIds = wco.tsConfig.options.enableI18nLegacyMessageIdFormat ?? true;
 
-      const partials = [
+      const partials: (Promise<Configuration> | Configuration)[] = [
         { plugins: [new NoEmitPlugin()] },
         getCommonConfig(wco),
-        getBrowserConfig(wco),
-        getTypeScriptConfig(wco),
-        getWorkerConfig(wco),
-        getStatsConfig(wco),
       ];
 
       // Add Ivy application file extractor support
@@ -223,7 +209,7 @@ export async function execute(
         module: {
           rules: [
             {
-              test: /\.[t|j]s$/,
+              test: /\.[cm]?[tj]sx?$/,
               loader: require.resolve('./ivy-extract-loader'),
               options: {
                 messageHandler: (messages: LocalizeMessage[]) => ivyMessages.push(...messages),
@@ -249,16 +235,11 @@ export async function execute(
     },
   );
 
-  try {
-    require.resolve('@angular/localize');
-  } catch {
-    return {
-      success: false,
-      error: `Ivy extraction requires the '@angular/localize' package.`,
-      outputPath: outFile,
-    };
-  }
-
+  // All the localize usages are setup to first try the ESM entry point then fallback to the deep imports.
+  // This provides interim compatibility while the framework is transitioned to bundled ESM packages.
+  const localizeToolsModule = await loadEsmModule<typeof import('@angular/localize/tools')>(
+    '@angular/localize/tools',
+  );
   const webpackResult = await runWebpack(
     (await transforms?.webpackConfiguration?.(config)) || config,
     context,
@@ -278,9 +259,7 @@ export async function execute(
 
   const basePath = config.context || projectRoot;
 
-  const { checkDuplicateMessages } = await import(
-    '@angular/localize/src/tools/src/extract/duplicates'
-  );
+  const { checkDuplicateMessages } = localizeToolsModule;
 
   // The filesystem is used to create a relative path for each file
   // from the basePath.  This relative path is then used in the error message.
@@ -303,6 +282,7 @@ export async function execute(
 
   // Serialize all extracted messages
   const serializer = await getSerializer(
+    localizeToolsModule,
     format,
     i18n.sourceLocale,
     basePath,
@@ -323,4 +303,4 @@ export async function execute(
   return webpackResult;
 }
 
-export default createBuilder<JsonObject & ExtractI18nBuilderOptions>(execute);
+export default createBuilder<ExtractI18nBuilderOptions>(execute);

@@ -8,7 +8,7 @@
 
 import { BuilderContext, BuilderOutput, createBuilder } from '@angular-devkit/architect';
 import { runWebpack } from '@angular-devkit/build-webpack';
-import { json, tags } from '@angular-devkit/core';
+import { tags } from '@angular-devkit/core';
 import * as path from 'path';
 import { Observable, from } from 'rxjs';
 import { concatMap, map } from 'rxjs/operators';
@@ -19,31 +19,24 @@ import { NormalizedBrowserBuilderSchema, deleteOutputDir } from '../../utils';
 import { i18nInlineEmittedFiles } from '../../utils/i18n-inlining';
 import { I18nOptions } from '../../utils/i18n-options';
 import { ensureOutputPaths } from '../../utils/output-paths';
-import { readTsconfig } from '../../utils/read-tsconfig';
+import { purgeStaleBuildCache } from '../../utils/purge-cache';
 import { assertCompatibleAngularVersion } from '../../utils/version';
 import { generateI18nBrowserWebpackConfigFromContext } from '../../utils/webpack-browser-config';
-import {
-  getCommonConfig,
-  getServerConfig,
-  getStatsConfig,
-  getStylesConfig,
-  getTypeScriptConfig,
-} from '../../webpack/configs';
+import { getCommonConfig, getStylesConfig } from '../../webpack/configs';
 import { webpackStatsLogger } from '../../webpack/utils/stats';
 import { Schema as ServerBuilderOptions } from './schema';
 
 /**
  * @experimental Direct usage of this type is considered experimental.
  */
-export type ServerBuilderOutput = json.JsonObject &
-  BuilderOutput & {
-    baseOutputPath: string;
-    outputPaths: string[];
-    /**
-     * @deprecated in version 9. Use 'outputPaths' instead.
-     */
-    outputPath: string;
-  };
+export type ServerBuilderOutput = BuilderOutput & {
+  baseOutputPath: string;
+  outputPaths: string[];
+  /**
+   * @deprecated in version 9. Use 'outputPaths' instead.
+   */
+  outputPath: string;
+};
 
 export { ServerBuilderOptions };
 
@@ -62,8 +55,6 @@ export function execute(
   // Check Angular version.
   assertCompatibleAngularVersion(root);
 
-  const tsConfig = readTsconfig(options.tsConfig, root);
-  const target = tsConfig.options.target || ScriptTarget.ES5;
   const baseOutputPath = path.resolve(root, options.outputPath);
   let outputPaths: undefined | Map<string, string>;
 
@@ -74,7 +65,7 @@ export function execute(
     );
   }
 
-  if (!options.bundleDependencies && tsConfig.options.enableIvy) {
+  if (!options.bundleDependencies) {
     // eslint-disable-next-line import/no-extraneous-dependencies
     const { __processed_by_ivy_ngcc__, main = '' } = require('@angular/core/package.json');
     if (
@@ -91,7 +82,7 @@ export function execute(
   }
 
   return from(initialize(options, context, transforms.webpackConfiguration)).pipe(
-    concatMap(({ config, i18n }) => {
+    concatMap(({ config, i18n, target }) => {
       return runWebpack(config, context, {
         webpackFactory: require('webpack') as typeof webpack,
         logging: (stats, config) => {
@@ -144,7 +135,7 @@ export function execute(
   );
 }
 
-export default createBuilder<json.JsonObject & ServerBuilderOptions, ServerBuilderOutput>(execute);
+export default createBuilder<ServerBuilderOptions, ServerBuilderOutput>(execute);
 
 async function initialize(
   options: ServerBuilderOptions,
@@ -153,9 +144,13 @@ async function initialize(
 ): Promise<{
   config: webpack.Configuration;
   i18n: I18nOptions;
+  target: ScriptTarget;
 }> {
+  // Purge old build disk cache.
+  await purgeStaleBuildCache(context);
+
   const originalOutputPath = options.outputPath;
-  const { config, i18n } = await generateI18nBrowserWebpackConfigFromContext(
+  const { config, i18n, target } = await generateI18nBrowserWebpackConfigFromContext(
     {
       ...options,
       buildOptimizer: false,
@@ -163,13 +158,7 @@ async function initialize(
       platform: 'server',
     } as NormalizedBrowserBuilderSchema,
     context,
-    (wco) => [
-      getCommonConfig(wco),
-      getServerConfig(wco),
-      getStylesConfig(wco),
-      getStatsConfig(wco),
-      getTypeScriptConfig(wco),
-    ],
+    (wco) => [getCommonConfig(wco), getStylesConfig(wco)],
   );
 
   let transformedConfig;
@@ -181,5 +170,5 @@ async function initialize(
     deleteOutputDir(context.workspaceRoot, originalOutputPath);
   }
 
-  return { config: transformedConfig || config, i18n };
+  return { config: transformedConfig || config, i18n, target };
 }

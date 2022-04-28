@@ -6,8 +6,6 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import * as path from 'path';
-
 function isDisabled(variable: string): boolean {
   return variable === '0' || variable.toLowerCase() === 'false';
 }
@@ -65,31 +63,6 @@ export const allowMangle = isPresent(mangleVariable)
 
 export const shouldBeautify = debugOptimize.beautify;
 export const allowMinify = debugOptimize.minify;
-
-// Build cache
-const cacheVariable = process.env['NG_BUILD_CACHE'];
-export const cachingDisabled = isPresent(cacheVariable) && isDisabled(cacheVariable);
-export const cachingBasePath = (() => {
-  if (cachingDisabled || !isPresent(cacheVariable) || isEnabled(cacheVariable)) {
-    return null;
-  }
-  if (!path.isAbsolute(cacheVariable)) {
-    throw new Error('NG_BUILD_CACHE path value must be absolute.');
-  }
-
-  return cacheVariable;
-})();
-
-// Persistent build cache
-const persistentBuildCacheVariable = process.env['NG_PERSISTENT_BUILD_CACHE'];
-export const persistentBuildCacheEnabled =
-  !cachingDisabled &&
-  isPresent(persistentBuildCacheVariable) &&
-  isEnabled(persistentBuildCacheVariable);
-
-// Build profiling
-const profilingVariable = process.env['NG_BUILD_PROFILING'];
-export const profilingEnabled = isPresent(profilingVariable) && isEnabled(profilingVariable);
 
 /**
  * Some environments, like CircleCI which use Docker report a number of CPUs by the host and not the count of available.

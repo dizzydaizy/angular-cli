@@ -12,7 +12,7 @@ import {
   createBuilder,
   targetFromTargetString,
 } from '@angular-devkit/architect';
-import { JsonObject, normalize, resolve } from '@angular-devkit/core';
+import { JsonObject } from '@angular-devkit/core';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizeOptimization } from '../../utils';
@@ -52,7 +52,7 @@ async function _renderUniversal(
   }
 
   const projectMetadata = await context.getProjectMetadata(projectName);
-  const projectRoot = resolve(normalize(root), normalize((projectMetadata.root as string) || ''));
+  const projectRoot = path.join(root, (projectMetadata.root as string | undefined) ?? '');
 
   const { styles } = normalizeOptimization(browserOptions.optimization);
   const inlineCriticalCssProcessor = styles.inlineCritical
@@ -114,9 +114,9 @@ async function _renderUniversal(
 
     if (browserOptions.serviceWorker) {
       await augmentAppWithServiceWorker(
-        normalize(root),
         projectRoot,
-        normalize(outputPath),
+        root,
+        outputPath,
         browserOptions.baseHref || '/',
         browserOptions.ngswConfigPath,
       );
@@ -143,7 +143,7 @@ async function _getServerModuleBundlePath(
     throw new Error(`Could not find server output directory: ${outputPath}.`);
   }
 
-  const re = /^main\.(?:[a-zA-Z0-9]{20}\.)?js$/;
+  const re = /^main\.(?:[a-zA-Z0-9]{16}\.)?js$/;
   const maybeMain = fs.readdirSync(outputPath).find((x) => re.test(x));
 
   if (!maybeMain) {
@@ -154,7 +154,7 @@ async function _getServerModuleBundlePath(
 }
 
 async function _appShellBuilder(
-  options: JsonObject & BuildWebpackAppShellSchema,
+  options: BuildWebpackAppShellSchema,
   context: BuilderContext,
 ): Promise<BuilderOutput> {
   const browserTarget = targetFromTargetString(options.browserTarget);

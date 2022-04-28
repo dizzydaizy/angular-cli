@@ -6,7 +6,7 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import { JsonObject, JsonValue, isJsonArray, isJsonObject } from '../interface';
+import { JsonObject, JsonValue, isJsonArray, isJsonObject } from '../utils';
 import { JsonPointer } from './interface';
 import { JsonSchema } from './schema';
 import { getTypesOfSchema } from './utility';
@@ -19,6 +19,8 @@ export function addUndefinedDefaults(
   if (typeof schema === 'boolean' || schema === undefined) {
     return value;
   }
+
+  value ??= schema.default;
 
   const types = getTypesOfSchema(schema);
   if (types.size === 0) {

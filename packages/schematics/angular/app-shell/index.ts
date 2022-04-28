@@ -35,11 +35,7 @@ import { BrowserBuilderOptions, Builders, ServerBuilderOptions } from '../utilit
 import { Schema as AppShellOptions } from './schema';
 
 function getSourceFile(host: Tree, path: string): ts.SourceFile {
-  const buffer = host.read(path);
-  if (!buffer) {
-    throw new SchematicsException(`Could not find ${path}.`);
-  }
-  const content = buffer.toString();
+  const content = host.readText(path);
   const source = ts.createSourceFile(path, content, ts.ScriptTarget.Latest, true);
 
   return source;
@@ -82,10 +78,9 @@ function getComponentTemplate(host: Tree, compPath: string, tmplInfo: TemplateIn
     const templateUrl = (tmplInfo.templateUrlProp.initializer as ts.StringLiteral).text;
     const dir = dirname(normalize(compPath));
     const templatePath = join(dir, templateUrl);
-    const buffer = host.read(templatePath);
-    if (buffer) {
-      template = buffer.toString();
-    }
+    try {
+      template = host.readText(templatePath);
+    } catch {}
   }
 
   return template;
@@ -119,13 +114,13 @@ function getBootstrapComponentPath(host: Tree, mainPath: string): string {
 
 function validateProject(mainPath: string): Rule {
   return (host: Tree, context: SchematicContext) => {
-    const routerOutletCheckRegex = /<router\-outlet.*?>([\s\S]*?)<\/router\-outlet>/;
+    const routerOutletCheckRegex = /<router-outlet.*?>([\s\S]*?)<\/router-outlet>/;
 
     const componentPath = getBootstrapComponentPath(host, mainPath);
     const tmpl = getComponentTemplateInfo(host, componentPath);
     const template = getComponentTemplate(host, componentPath, tmpl);
     if (!routerOutletCheckRegex.test(template)) {
-      const errorMsg = `Prerequisite for app shell is to define a router-outlet in your root component.`;
+      const errorMsg = `Prerequisite for application shell is to define a router-outlet in your root component.`;
       context.logger.error(errorMsg);
       throw new SchematicsException(errorMsg);
     }
@@ -247,7 +242,7 @@ function addServerRoutes(options: AppShellOptions): Rule {
     if (!clientServerTarget) {
       throw new Error('Universal schematic did not add server target to client project.');
     }
-    const clientServerOptions = (clientServerTarget.options as unknown) as ServerBuilderOptions;
+    const clientServerOptions = clientServerTarget.options as unknown as ServerBuilderOptions;
     if (!clientServerOptions) {
       throw new SchematicsException('Server target does not contain options.');
     }
@@ -326,8 +321,8 @@ export default function (options: AppShellOptions): Rule {
     if (!clientBuildTarget) {
       throw targetBuildNotFoundError();
     }
-    const clientBuildOptions = ((clientBuildTarget.options ||
-      {}) as unknown) as BrowserBuilderOptions;
+    const clientBuildOptions = (clientBuildTarget.options ||
+      {}) as unknown as BrowserBuilderOptions;
 
     return chain([
       validateProject(clientBuildOptions.main),

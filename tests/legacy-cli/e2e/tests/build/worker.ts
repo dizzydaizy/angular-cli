@@ -6,19 +6,12 @@
  * found in the LICENSE file at https://angular.io/license
  */
 
-import { join } from 'path';
-import {
-  appendToFile,
-  expectFileToExist,
-  expectFileToMatch,
-  replaceInFile,
-  writeFile,
-} from '../../utils/fs';
+import { expectFileToExist, expectFileToMatch, replaceInFile, writeFile } from '../../utils/fs';
 import { ng } from '../../utils/process';
 
 export default async function () {
-  const workerPath = join('src', 'app', 'app.worker.ts');
-  const snippetPath = join('src', 'app', 'app.component.ts');
+  const workerPath = 'src/app/app.worker.ts';
+  const snippetPath = 'src/app/app.component.ts';
   const projectTsConfig = 'tsconfig.json';
   const workerTsConfig = 'tsconfig.worker.json';
 

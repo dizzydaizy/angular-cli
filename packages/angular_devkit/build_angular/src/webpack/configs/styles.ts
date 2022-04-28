@@ -7,27 +7,27 @@
  */
 
 import * as fs from 'fs';
+import MiniCssExtractPlugin from 'mini-css-extract-plugin';
 import * as path from 'path';
-import * as webpack from 'webpack';
-import { ExtraEntryPoint } from '../../builders/browser/schema';
+import { Configuration, RuleSetUseItem } from 'webpack';
+import { StyleElement } from '../../builders/browser/schema';
 import { SassWorkerImplementation } from '../../sass/sass-service';
-import { BuildBrowserFeatures } from '../../utils/build-browser-features';
 import { WebpackConfigOptions } from '../../utils/build-options';
-import { maxWorkers } from '../../utils/environment-options';
 import {
   AnyComponentStyleBudgetChecker,
   PostcssCliResources,
   RemoveHashPlugin,
   SuppressExtractedTextChunksWebpackPlugin,
 } from '../plugins';
+import { CssOptimizerPlugin } from '../plugins/css-optimizer-plugin';
 import {
   assetNameTemplateFactory,
   getOutputHashFormat,
   normalizeExtraEntryPoints,
 } from '../utils/helpers';
 
-function resolveGlobalStyles(
-  styleEntrypoints: ExtraEntryPoint[],
+export function resolveGlobalStyles(
+  styleEntrypoints: StyleElement[],
   root: string,
   preserveSymlinks: boolean,
 ): { entryPoints: Record<string, string[]>; noInjectNames: string[]; paths: string[] } {
@@ -71,20 +71,19 @@ function resolveGlobalStyles(
 }
 
 // eslint-disable-next-line max-lines-per-function
-export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuration {
-  const MiniCssExtractPlugin = require('mini-css-extract-plugin');
+export function getStylesConfig(wco: WebpackConfigOptions): Configuration {
   const postcssImports = require('postcss-import');
   const postcssPresetEnv: typeof import('postcss-preset-env') = require('postcss-preset-env');
 
   const { root, buildOptions } = wco;
-  const extraPlugins: { apply(compiler: webpack.Compiler): void }[] = [];
+  const extraPlugins: Configuration['plugins'] = [];
 
   extraPlugins.push(new AnyComponentStyleBudgetChecker(buildOptions.budgets));
 
   const cssSourceMap = buildOptions.sourceMap.styles;
 
   // Determine hashing format.
-  const hashFormat = getOutputHashFormat(buildOptions.outputHashing as string);
+  const hashFormat = getOutputHashFormat(buildOptions.outputHashing);
 
   // use includePaths from appConfig
   const includePaths =
@@ -112,7 +111,7 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
   extraPlugins.push({
     apply(compiler) {
       compiler.hooks.shutdown.tap('sass-worker', () => {
-        sassImplementation?.close();
+        sassImplementation.close();
       });
     },
   });
@@ -148,16 +147,12 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
       );
     }
     if (tailwindPackagePath) {
-      if (process.env['TAILWIND_MODE'] === undefined) {
-        process.env['TAILWIND_MODE'] = buildOptions.watch ? 'watch' : 'build';
-      }
       extraPostcssPlugins.push(require(tailwindPackagePath)({ config: tailwindConfigPath }));
     }
   }
 
-  const { supportedBrowsers } = new BuildBrowserFeatures(wco.projectRoot);
   const postcssPresetEnvPlugin = postcssPresetEnv({
-    browsers: supportedBrowsers,
+    browsers: buildOptions.supportedBrowsers,
     autoprefixer: true,
     stage: 3,
   });
@@ -172,7 +167,7 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
         : undefined,
       plugins: [
         postcssImports({
-          resolve: (url: string) => (url.startsWith('~') ? url.substr(1) : url),
+          resolve: (url: string) => (url.startsWith('~') ? url.slice(1) : url),
           load: (filename: string) => {
             return new Promise<string>((resolve, reject) => {
               loader.fs.readFile(filename, (err: Error, data: Buffer) => {
@@ -230,7 +225,7 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
   const postCss = require('postcss');
   const postCssLoaderPath = require.resolve('postcss-loader');
 
-  const componentStyleLoaders: webpack.RuleSetUseItem[] = [
+  const componentStyleLoaders: RuleSetUseItem[] = [
     {
       loader: postCssLoaderPath,
       options: {
@@ -240,7 +235,7 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
     },
   ];
 
-  const globalStyleLoaders: webpack.RuleSetUseItem[] = [
+  const globalStyleLoaders: RuleSetUseItem[] = [
     {
       loader: MiniCssExtractPlugin.loader,
     },
@@ -261,74 +256,9 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
     },
   ];
 
-  const extraMinimizers = [];
-  if (buildOptions.optimization.styles.minify) {
-    const CssMinimizerPlugin = require('css-minimizer-webpack-plugin');
-    const esbuild = require('esbuild') as typeof import('esbuild');
-
-    const cssnanoOptions = {
-      preset: [
-        'default',
-        {
-          // Disable SVG optimizations, as this can cause optimizations which are not compatible in all browsers.
-          svgo: false,
-          // Disable `calc` optimizations, due to several issues. #16910, #16875, #17890
-          calc: false,
-          // Disable CSS rules sorted due to several issues #20693, https://github.com/ionic-team/ionic-framework/issues/23266 and https://github.com/cssnano/cssnano/issues/1054
-          cssDeclarationSorter: false,
-          // Workaround for Critters as it doesn't work when `@media all {}` is minified to `@media {}`.
-          // TODO: Remove once they move to postcss.
-          minifyParams: !buildOptions.optimization.styles.inlineCritical,
-        },
-      ],
-    };
-
-    const globalBundlesRegExp = new RegExp(
-      `^(${Object.keys(entryPoints).join('|')})(\.[0-9a-f]{20})?.css$`,
-    );
-
-    extraMinimizers.push(
-      // Component styles use esbuild which is faster and generates smaller files on average.
-      // esbuild does not yet support style sourcemaps but component style sourcemaps are not
-      // supported by the CLI when style minify is enabled.
-      new CssMinimizerPlugin({
-        // Component styles retain their original file name
-        test: /\.(?:css|scss|sass|less|styl)$/,
-        exclude: globalBundlesRegExp,
-        parallel: false,
-        minify: async (data: string) => {
-          const [[sourcefile, input]] = Object.entries(data);
-          const { code, warnings } = await esbuild.transform(input, {
-            loader: 'css',
-            minify: true,
-            sourcefile,
-          });
-
-          return {
-            code,
-            warnings:
-              warnings.length > 0
-                ? await esbuild.formatMessages(warnings, { kind: 'warning' })
-                : [],
-          };
-        },
-      }),
-      // Global styles use cssnano since sourcemap support is required even when minify
-      // is enabled. Once esbuild supports style sourcemaps this can be changed.
-      // esbuild stylesheet source map support issue: https://github.com/evanw/esbuild/issues/519
-      new CssMinimizerPlugin({
-        test: /\.css$/,
-        include: globalBundlesRegExp,
-        parallel: maxWorkers,
-        minify: [CssMinimizerPlugin.cssnanoMinify],
-        minimizerOptions: cssnanoOptions,
-      }),
-    );
-  }
-
   const styleLanguages: {
     extensions: string[];
-    use: webpack.RuleSetUseItem[];
+    use: RuleSetUseItem[];
   }[] = [
     {
       extensions: ['css'],
@@ -442,16 +372,17 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
           // Setup processing rules for global and component styles
           {
             oneOf: [
-              // Component styles are all styles except defined global styles
-              {
-                exclude: globalStylePaths,
-                use: componentStyleLoaders,
-                type: 'asset/source',
-              },
               // Global styles are only defined global styles
               {
-                include: globalStylePaths,
                 use: globalStyleLoaders,
+                include: globalStylePaths,
+                resourceQuery: { not: [/\?ngResource/] },
+              },
+              // Component styles are all styles except defined global styles
+              {
+                use: componentStyleLoaders,
+                type: 'asset/source',
+                resourceQuery: /\?ngResource/,
               },
             ],
           },
@@ -460,7 +391,13 @@ export function getStylesConfig(wco: WebpackConfigOptions): webpack.Configuratio
       })),
     },
     optimization: {
-      minimizer: extraMinimizers,
+      minimizer: buildOptions.optimization.styles.minify
+        ? [
+            new CssOptimizerPlugin({
+              supportedBrowsers: buildOptions.supportedBrowsers,
+            }),
+          ]
+        : undefined,
     },
     plugins: extraPlugins,
   };

@@ -24,7 +24,7 @@
     "@jsdevtools/coverage-istanbul-loader": "3.0.5",
     "@ngtools/webpack": "0.0.0",
     "ansi-colors": "4.1.1",
-    "babel-loader": "8.2.2",
+    "babel-loader": "8.2.4",
     "browserslist": "^4.9.1",
     "cacache": "15.2.0",
     "caniuse-lite": "^1.0.30001032",
